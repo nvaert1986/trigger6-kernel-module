@@ -533,7 +533,7 @@ hardware-tested as part of `1.0.0` (see its testing status above).
     and keeps interrupting the reader with SIGUSR2 until it has left its loop.
 15. Docs: `DEPENDENCIES.md` header said `0.9.0-r7`; the README claimed `dkms.conf` only ships in `packaging/debian13/`.
 
-#### Found by comparing with the vendor Windows driver (also inherited from upstream `mct-t6-linux`)
+#### Timing and colour data (also inherited from upstream `mct-t6-linux`)
 
 16. **Corrupt 1080p timing** (`t6_mode_1080p`, `t6_mode_1080p30`). Both blobs had hsync_start 1816 and vsync_start
     1000, which lie inside the visible 1920x1080 area, and a vsync width of 29 lines. Chip init sends the 1080p60
