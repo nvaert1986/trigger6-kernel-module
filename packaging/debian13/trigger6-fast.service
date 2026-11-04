@@ -1,0 +1,11 @@
+[Unit]
+Description=MCT Trigger 6 SIMD NV12 conversion helper
+ConditionPathExistsGlob=/dev/trigger6-*-out0-nv12
+
+[Service]
+ExecStart=/usr/bin/trigger6-fast
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

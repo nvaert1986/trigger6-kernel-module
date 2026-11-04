@@ -1,0 +1,14 @@
+# Kernel build output
+*.o
+*.ko
+*.mod
+*.mod.c
+*.cmd
+*.a
+.*.d
+Module.symvers
+modules.order
+.tmp_versions/
+# Helper binary
+/trigger6-fast
+/userspace/trigger6-fast

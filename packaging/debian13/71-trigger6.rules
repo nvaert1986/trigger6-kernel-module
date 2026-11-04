@@ -1,0 +1,4 @@
+# Give the logged-in seat user access to the DRM node and the SIMD bridge node,
+# and start the per-user helper when the bridge node appears.
+SUBSYSTEM=="drm", KERNEL=="card[0-9]*", DRIVERS=="trigger6", TAG+="uaccess", TAG+="seat"
+SUBSYSTEM=="misc", KERNEL=="trigger6-*-out0-nv12", TAG+="uaccess", TAG+="systemd", ENV{SYSTEMD_USER_WANTS}+="trigger6-fast.service"
