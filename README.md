@@ -16,16 +16,17 @@ setup, with a stable USB connection.
 
 1. [Tested configuration](#tested-configuration)
 2. [Results](#results)
-3. [How it works](#how-it-works)
-4. [Requirements](#requirements)
-5. [Build and install](#build-and-install)
-6. [Running the fast helper](#running-the-fast-helper)
-7. [Activating the monitor](#activating-the-monitor)
-8. [Module parameters](#module-parameters)
-9. [Troubleshooting](#troubleshooting)
-10. [Limitations](#limitations)
-11. [Changelog](#changelog)
-12. [Origin, license and credits](#origin-license-and-credits)
+3. [What is in this repository](#what-is-in-this-repository)
+4. [How it works](#how-it-works)
+5. [Requirements](#requirements)
+6. [Build and install](#build-and-install)
+7. [Running the fast helper](#running-the-fast-helper)
+8. [Activating the monitor](#activating-the-monitor)
+9. [Module parameters](#module-parameters)
+10. [Troubleshooting](#troubleshooting)
+11. [Limitations](#limitations)
+12. [Changelog](#changelog)
+13. [Origin, license and credits](#origin-license-and-credits)
 
 ---
 
@@ -69,6 +70,21 @@ Caveats, stated plainly:
   analyser, and it includes frames that differ only by mouse-cursor movement.
 * With the helper stopped the driver falls back to in-kernel conversion at roughly **29 frames/s**.
 * The refresh rate of the HDMI mode is 60 Hz, so 60 frames/s is the practical ceiling.
+
+## What is in this repository
+
+| Path | What it is |
+|---|---|
+| `kernel/` | The DRM/KMS kernel module `trigger6.ko` (sources, `Makefile`, `Kbuild`) |
+| `userspace/trigger6-fast.c` | The user-space SIMD helper `trigger6-fast` (NV12 conversion with libyuv), see [section C](#c-install-the-helper) |
+| `dkms.conf` | DKMS configuration, see [section B](#b-permanent-install-with-dkms-debian-13--ubuntu--arch) |
+| `packaging/debian13/trigger6-fast.service` | systemd **user** service that runs the helper, see [section D](#d-device-permissions-and-autostart-recommended) |
+| `packaging/debian13/71-trigger6.rules` | udev rule: gives the logged-in user access to the adapter and starts the helper service when its device appears |
+| `packaging/debian13/trigger6.conf` | modprobe options file (`primary_userspace_nv12=1`) for `/etc/modprobe.d/` |
+| `packaging/debian13/Makefile.helper` | Makefile for building the helper |
+| `packaging/debian13/trigger6-fast.c`, `dkms.conf` | Identical copies of the helper source and `dkms.conf`, so the folder is a complete packaging input |
+| `packaging/debian13/DEPENDENCIES.md` | Package dependencies and test notes for Debian 13 (in Dutch) |
+| `LICENSE` | GPL-2.0-only for the kernel module and the helper; MIT notice for upstream-derived user-space tools |
 
 ## How it works
 
@@ -137,8 +153,9 @@ The kernel only exports a frame when the desktop reports an update, and a period
 
 1. **Device memory:** three NV12 frame slots (4 MiB each) in the adapter's video memory. Each new frame is written
    into the next slot with an increasing fence id and the flip command points the display at it, so the chip is
-   never scanning out a half-written frame. This resembles the Windows driver's three-slot scheme; the full
-   interrupt/fence read-back of the Windows driver is *not* reproduced, so perfect tear-free behaviour is not claimed.
+   never scanning out a half-written frame. This resembles the Windows driver's three-slot scheme. The adapter's
+   flip-done events (interrupt endpoint 0x83) are read and counted (`flips_done`, `last_done_fence` in `t6_metrics`),
+   but not yet used to pace frames, so perfect tear-free behaviour is not claimed.
 2. **Helper:** three NV12 buffers, at most one finished frame waiting while another is being sent.
    A newer frame replaces a stale waiting one, which bounds latency instead of building a queue.
 3. **Overlapped pipeline:** conversion of frame *N+1* (about 4 ms) runs while frame *N* is still on its way over USB
@@ -200,8 +217,8 @@ make                                    # builds trigger6.ko for the running ker
 sudo insmod ./trigger6.ko primary_userspace_nv12=1
 ```
 
-For a different kernel use `make KVER=<version>`. To unload: stop the helper, run
-`xrandr --output <T6 output> --off`, then `sudo rmmod trigger6`. Some desktops hold the device open. If `rmmod` says
+For a different kernel use `make KVER=<version>`. To unload: stop the helper, switch the output off (Xorg:
+`xrandr --output <T6 output> --off`; Wayland: in the display settings), then `sudo rmmod trigger6`. Some desktops hold the device open. If `rmmod` says
 "in use", first unbind it: `echo 2-2:1.0 | sudo tee /sys/bus/usb/drivers/trigger6/unbind` (use the interface
 name shown under `/sys/bus/usb/drivers/trigger6/`) and retry after a second or two.
 
@@ -209,6 +226,7 @@ name shown under `/sys/bus/usb/drivers/trigger6/`) and retry after a second or t
 
 ```bash
 sudo apt install dkms build-essential linux-headers-amd64 libyuv0   # Debian 13
+sudo pacman -S --needed dkms base-devel linux-headers libyuv        # Arch (linux-lts-headers for the LTS kernel)
 
 VER=1.0.0
 sudo mkdir -p /usr/src/trigger6-$VER
@@ -217,12 +235,14 @@ sudo dkms add     -m trigger6 -v $VER
 sudo dkms build   -m trigger6 -v $VER
 sudo dkms install -m trigger6 -v $VER
 
-echo 'options trigger6 primary_userspace_nv12=1' | sudo tee /etc/modprobe.d/trigger6.conf
+sudo install -m 0644 packaging/debian13/trigger6.conf /etc/modprobe.d/trigger6.conf
 sudo modprobe trigger6
 ```
 
 `dkms.conf` is in the repository root (an identical copy is in `packaging/debian13/`) and is copied along as shown.
 DKMS then rebuilds the module for each newly installed kernel. Remember that matching headers must be installed.
+`trigger6.conf` sets `primary_userspace_nv12=1`, so the module uses the fast helper whenever it runs.
+Check the installed version with `modinfo -F version trigger6` (prints `1.0.0`).
 
 ### C. Install the helper
 
@@ -231,6 +251,7 @@ cc -O3 -Wall -Wextra -pthread -o trigger6-fast userspace/trigger6-fast.c -ldl
 sudo install -m 0755 trigger6-fast /usr/local/bin/trigger6-fast
 ```
 
+`make -C packaging/debian13 -f Makefile.helper` builds the same binary (in `packaging/debian13/`) for packaging.
 The helper loads `libyuv.so.0` (or `libyuv.so`) with `dlopen`, so no development package is needed at build time.
 
 ### D. Device permissions and autostart (recommended)
@@ -243,9 +264,14 @@ sudo install -m 0644 packaging/debian13/71-trigger6.rules /etc/udev/rules.d/
 sudo install -m 0644 packaging/debian13/trigger6-fast.service /etc/systemd/user/
 sudo sed -i 's#/usr/bin/trigger6-fast#/usr/local/bin/trigger6-fast#' /etc/systemd/user/trigger6-fast.service
 sudo udevadm control --reload-rules
+systemctl --user daemon-reload                     # as the desktop user, not as root
 ```
 
-The udev rule gives the logged-in seat user access and asks systemd to start the helper when the node appears.
+The service file starts `/usr/bin/trigger6-fast` (the path a distribution package would use); the `sed` line points
+it at `/usr/local/bin`, where section C installs the helper. The udev rule gives the logged-in seat user access to the
+adapter and asks systemd to start the helper service when the bridge node appears, so there is nothing to enable.
+Unplug and replug the adapter once (or reboot) so the rule applies. Check it with
+`systemctl --user status trigger6-fast`.
 **This udev/systemd integration has not been tested on Debian.** Manual alternative for one session:
 
 ```bash
@@ -272,7 +298,8 @@ xrandr                                                   # find the new output
 xrandr --output HDMI-1-3 --mode 1920x1080 --right-of HDMI-2 --rate 60
 ```
 
-Pick the output names from your own `xrandr` listing. Other desktops use their display settings dialog.
+Pick the output names from your own `xrandr` listing. On Wayland, use the desktop's display settings
+(on KDE Plasma also `kscreen-doctor -o` to list outputs and `kscreen-doctor output.<name>.enable` to switch one on).
 Check the driver's own counters while running:
 
 ```bash
@@ -297,7 +324,7 @@ Set one at load time with `modprobe trigger6 name=value`.
 
 ## Troubleshooting
 
-* **No output / black screen after plug-in:** re-activate the output with `xrandr`. After a re-enumeration the device number changes, so the helper must pick up the new node (it does when restarted).
+* **No output / black screen after plug-in:** re-activate the output with `xrandr` (Xorg) or the display settings (Wayland). After a re-enumeration the device number changes, so the helper must pick up the new node (it does when restarted).
 * **Stutter when moving the mouse:** make sure `trigger6-fast` is actually running (`pgrep -a trigger6`). Without it you only get the in-kernel fallback.
 * **`insmod: File exists` / `rmmod: in use`:** unbind the interface first (see section A).
 * **Build fails with an unknown DRM symbol:** please report the exact kernel version. The code detects `drm_atomic_commit` and `drm_dev_set_dma_dev` from the headers, but other API differences may exist.
