@@ -357,7 +357,7 @@ Set one at load time with `modprobe trigger6 name=value`.
 
 ## Changelog
 
-### 1.0.0 (2026-11-04): aligned with the vendor Windows driver
+### 1.0.0 (2026-11-04)
 
 First public release, previously developed as `0.9.0-r10`. Upgrading an existing DKMS install: find the installed
 version with `dkms status trigger6`, run `dkms remove trigger6/<old version> --all`, then install `1.0.0` as in
@@ -371,7 +371,7 @@ Wayland, including the changed init and mode-change sequence (items 20 and 21). 
 unplugging the USB adapter, which crashes the X server with a segmentation fault (an Xorg bug, reported to Debian;
 see [Limitations](#limitations)). Unplugging the HDMI cable works on both.
 
-#### Aligned with the vendor Windows driver
+#### Protocol changes
 
 Each item below is backed by the USB capture of the vendor driver and/or static analysis of `T6InDisp.dll`.
 
@@ -575,7 +575,7 @@ original companion tools goes to the original author. The copyright notice
 * Primary-output NV12 transport, 1 047 552-byte USB chunks, three device-side frame slots.
 * The user-space SIMD bridge (`trigger6_bridge.h`, `trigger6-fast`), the asynchronous two-URB USB path and the removal of per-frame copies.
 * `0.9.0-r9`: review fixes for fault recovery, probe error handling, output switch-off, suspend/resume, mode handling and the helper, plus corrected 1080p timing and colour data.
-* `1.0.0`: aligned with the vendor Windows driver: init and mode-set sequence, interrupt endpoint, the adapter's own mode table and sync encoding (see [Changelog](#changelog)).
+* `1.0.0`: init and mode-set sequence, interrupt endpoint, the adapter's own mode table and sync encoding (see [Changelog](#changelog)).
 * This work was done by the fork maintainer together with AI coding assistants (OpenAI Codex, then Anthropic Claude Code). Protocol facts also come from a static analysis of the vendor's Windows driver. No vendor code is included.
 
 These changes are **not** endorsed by or affiliated with the original author. Please report problems with this fork in this
