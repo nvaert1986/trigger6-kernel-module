@@ -86,7 +86,7 @@ Caveats, stated plainly:
 | `packaging/debian13/trigger6.conf` | modprobe options file (`primary_userspace_nv12=1`) for `/etc/modprobe.d/` |
 | `packaging/debian13/Makefile.helper` | Makefile for building the helper |
 | `packaging/debian13/trigger6-fast.c`, `dkms.conf` | Identical copies of the helper source and `dkms.conf`, so the folder is a complete packaging input |
-| `packaging/debian13/DEPENDENCIES.md` | Package dependencies and test notes for Debian 13 (in Dutch) |
+| `packaging/debian13/DEPENDENCIES.md` | Package dependencies and test notes for Debian 13 |
 | `LICENSE` | GPL-2.0-only for the kernel module and the helper; MIT notice for upstream-derived user-space tools |
 
 ## How it works

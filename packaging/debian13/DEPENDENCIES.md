@@ -1,48 +1,48 @@
-# trigger6 1.0.1 - doel: Debian 13 (trixie), kernel 6.12.x LTS
+# trigger6 1.0.1 - target: Debian 13 (trixie), kernel 6.12.x LTS
 
-## Pakket `trigger6-dkms` (kernelmodule)
-| Dependency | Soort | Toelichting |
+## Package `trigger6-dkms` (kernel module)
+| Dependency | Type | Notes |
 |---|---|---|
 | dkms (>= 3.0) | Depends | Debian 13: 3.2.2 |
-| make, gcc (>= 14) | Depends | Moet bij de kernelcompiler passen (Debian 13: gcc-14) |
-| linux-headers-amd64 | Depends/Recommends | Headers voor 6.12.x (bijv. 6.12.107+deb13) |
+| make, gcc (>= 14) | Depends | Must match the compiler the kernel was built with (Debian 13: gcc-14) |
+| linux-headers-amd64 | Depends/Recommends | Headers for 6.12.x (for example 6.12.107+deb13) |
 | kmod | Depends | modprobe/depmod |
-| pahole | Recommends | Alleen voor BTF-generatie door kbuild |
-| udev (systemd) | Aanbevolen | `71-trigger6.rules` |
+| pahole | Recommends | Only for BTF generation by kbuild |
+| udev (systemd) | Recommends | `71-trigger6.rules` |
 
-Kernelconfig-eisen (standaard in Debian): CONFIG_DRM, CONFIG_DRM_KMS_HELPER, CONFIG_DRM_GEM_SHMEM_HELPER, CONFIG_USB.
+Required kernel options (default on Debian): CONFIG_DRM, CONFIG_DRM_KMS_HELPER, CONFIG_DRM_GEM_SHMEM_HELPER, CONFIG_USB.
 
-## Pakket `trigger6-fast` (gebruikersruimte-helper, optioneel maar nodig voor ~60 fps)
-| Dependency | Soort | Toelichting |
+## Package `trigger6-fast` (user-space helper, optional but needed for ~60 fps)
+| Dependency | Type | Notes |
 |---|---|---|
 | libc6 (>= 2.34) | Depends | pthread, dlopen in libc |
-| libyuv0 | Depends | Laadt `libyuv.so.0` met dlopen; Debian 13: 0.0.1904.20250204 |
-| gcc, make | Build-Depends | Bouwen met `Makefile.helper` |
-| systemd | Recommends | gebruikersservice `trigger6-fast.service` |
-Zonder helper valt de driver terug op kernelconversie (~29 fps).
+| libyuv0 | Depends | Loads `libyuv.so.0` with dlopen; Debian 13: 0.0.1904.20250204 |
+| gcc, make | Build-Depends | Build with `Makefile.helper` |
+| systemd | Recommends | User service `trigger6-fast.service` |
+Without the helper the driver falls back to in-kernel conversion (~29 fps).
 
-## Testfeiten
-- Module gecompileerd (zonder fouten of waarschuwingen) tegen Debian `linux-headers-6.12.107+deb13-amd64` op Arch (cross-build). Alleen de BTF-stap faalde door hosttools. Gelinkt: ja.
-- Gedraaid en gemeten: alleen Arch 7.2.9, Xorg. Debian 13 zelf is **niet** gedraaid.
-- udev-regel en systemd-gebruikersservice: niet op Debian getest.
+## Test facts
+- Module compiled (no errors or warnings) against Debian `linux-headers-6.12.107+deb13-amd64` on Arch (cross-build). Only the BTF step failed, because of host tools. Linked: yes.
+- Run and measured: only Arch 7.2.9, Xorg. Debian 13 itself was **not** run.
+- udev rule and systemd user service: not tested on Debian.
 
-## 0.9.0-r8 - aanvullende controles
-- Gecompileerd tegen Debian `linux-headers-6.12.107+deb13-amd64` (compat-pad `T6_HAVE_DRM_SET_DMA_DEV`), tegen 6.18.55-lts en 7.2.9: zonder fouten/waarschuwingen (BTF-stap alleen niet op de hostmachine).
-- Gedraaid: Arch 7.2.9. Gesimuleerde unplug (USB-deauthorisatie) tijdens schrijven: schone disconnect, module vrij, herstel na heraansluiting.
-- Niet gedaan: runtime op Debian 13, KASAN/lockdep-kernel.
+## 0.9.0-r8 - additional checks
+- Compiled against Debian `linux-headers-6.12.107+deb13-amd64` (compatibility path `T6_HAVE_DRM_SET_DMA_DEV`), against 6.18.55-lts and 7.2.9: no errors or warnings (only the BTF step failed, on the host machine).
+- Run: Arch 7.2.9. Simulated unplug (USB de-authorisation) while writing: clean disconnect, module released, recovery after reconnecting.
+- Not done: running on Debian 13, KASAN/lockdep kernel.
 
-## 0.9.0-r9 - aanvullende controles
-- Gecompileerd tegen 6.18.59 (Gentoo) met `W=1`: zonder fouten of waarschuwingen. Nog niet opnieuw gecompileerd tegen Debian `linux-headers-6.12.107+deb13-amd64` en 7.2.9.
-- Geen nieuwe dependencies. De `drm_edid`-API die nu voor de EDID wordt gebruikt, bestaat sinds kernel 6.3.
-- Helper getest met libyuv: stopt binnen ongeveer 20 ms op SIGTERM/SIGINT, ook als hij in `read()` wacht.
-- Niet gedaan: runtime op de adapter. Zie de testlijst in de changelog van `README.md`.
+## 0.9.0-r9 - additional checks
+- Compiled against 6.18.59 (Gentoo) with `W=1`: no errors or warnings. Not yet recompiled against Debian `linux-headers-6.12.107+deb13-amd64` and 7.2.9.
+- No new dependencies. The `drm_edid` API now used for the EDID exists since kernel 6.3.
+- Helper tested with libyuv: stops within about 20 ms on SIGTERM/SIGINT, also while it waits in `read()`.
+- Not done: running on the adapter. See the test checklist in the changelog of `README.md`.
 
-## 1.0.0 - aanvullende controles
-- Vergeleken met de Windows-driver van de leverancier (USB-capture en `T6InDisp.dll`): init- en modusvolgorde, interrupt-endpoint 0x83, eigen modustabel van de adapter en sync-codering. Geen nieuwe dependencies. Nieuwe moduleparameter `keepalive_ms` (0 = uit).
-- Gecompileerd tegen Debian 13 (kernel 6.12), Arch Linux (kernel 7.2) en 6.18.59 (Gentoo, `W=1`, zonder fouten of waarschuwingen).
-- Getest op de adapter: werkt volledig onder Wayland. Onder Xorg crasht de X-server (SIGSEGV) bij het loskoppelen van de USB-adapter; loskoppelen van alleen de HDMI-kabel werkt wel. Gemeld bij Debian als Xorg-bug.
+## 1.0.0 - additional checks
+- Compared with the vendor's Windows driver (USB capture and `T6InDisp.dll`): init and mode-set sequence, interrupt endpoint 0x83, the adapter's own mode table and sync encoding. No new dependencies. New module parameter `keepalive_ms` (0 = off).
+- Compiled against Debian 13 (kernel 6.12), Arch Linux (kernel 7.2) and 6.18.59 (Gentoo, `W=1`, no errors or warnings).
+- Tested on the adapter: fully working under Wayland. Under Xorg the X server crashes (SIGSEGV) when the USB adapter is unplugged; unplugging only the HDMI cable works. Reported to Debian as an Xorg bug.
 
-## 1.0.1 - aanvullende controles
-- Geen nieuwe dependencies.
-- Gecompileerd tegen 6.18.59 (Gentoo, `W=1`, zonder fouten of waarschuwingen). De wijzigingen gebruiken geen kernelinterfaces naast die van 1.0.0, dat compileert op Debian 13 (kernel 6.12) en Arch Linux (kernel 7.2).
-- Getest op de adapter met een Dell P2725HE onder KDE Plasma (Wayland), Gentoo met kernel 6.18.59: beeld, helper, moduswissels, HDMI-hotplug, flip-done-events en een volledige start-up per aansluiting. Zie de changelog in `README.md`.
+## 1.0.1 - additional checks
+- No new dependencies.
+- Compiled against 6.18.59 (Gentoo, `W=1`, no errors or warnings). The changes use no kernel interfaces beyond those of 1.0.0, which compiles on Debian 13 (kernel 6.12) and Arch Linux (kernel 7.2).
+- Tested on the adapter with a Dell P2725HE under KDE Plasma (Wayland), Gentoo with kernel 6.18.59: picture, helper, mode switches, HDMI hotplug, flip-done events and one full start-up per plug-in. See the changelog in `README.md`.
