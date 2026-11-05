@@ -1,4 +1,4 @@
-# MCT Trigger 6 (T6) USB display driver for Linux, release `1.0.3`
+# MCT Trigger 6 (T6) USB display driver for Linux, release `1.0.4`
 
 An out-of-tree Linux DRM/KMS kernel driver and a small user-space helper for the
 MCT "T6 USB Station" chipset, as found in the **StarTech USB32HDES** USB 3.0 to HDMI adapter.
@@ -6,7 +6,7 @@ This release reaches about **60 new frames per second at 1920x1080** on the test
 setup, with a stable USB connection.
 
 > **Status: experimental.** Tested on one adapter model (see
-> [Tested configuration](#tested-configuration)). Version 1.0.3 works on Wayland and builds on Arch Linux (kernel 7.2) and
+> [Tested configuration](#tested-configuration)). Version 1.0.4 works on Wayland and builds on Arch Linux (kernel 7.2) and
 > Debian 13 (kernel 6.12). **On Xorg, unplugging the USB adapter crashes the X server** (a bug in Xorg, reported to
 > Debian, see [Limitations](#limitations)); unplugging only the HDMI cable is fine. Use at your own risk.
 
@@ -45,6 +45,9 @@ setup, with a stable USB connection.
 | 1.0.0 start-up test | Gentoo, Linux 6.18.59 with enforced module signatures: plug-in, chip init, mode table and unplug checked against a USB capture (no monitor attached yet) |
 | 1.0.0 and 1.0.1 monitor test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), Dell P2725HE: picture, helper, mode switches, HDMI hotplug, flip-done events and `keepalive_ms=0`, checked against `t6_metrics` and a USB capture |
 | 1.0.3 monitor test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), seven monitors from three brands: each detected on plug-in, set to its native mode, clean picture, no errors |
+| 1.0.4 builds | Linux 6.18.59 (`W=1`, no warnings); uses no kernel interfaces beyond those 1.0.0 needs, which builds on Debian 13 (6.12) and Arch Linux (7.2) |
+| 1.0.4 keepalive test | Same setup, `keepalive_ms=0` on six monitors (Dell P2725HE, P2319H, P2726HE, P2317H, iiyama PL2595W, HP E233): picture kept for 59 to 88 s without a single frame |
+| 1.0.4 single-output test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), Dell P2725HE: one output detected from the device information block, about 32 MB less memory, no idle USB polling, HDMI replug detected through interrupt events |
 | 1.0.3 builds | Linux 6.18.59 (`W=1`, no warnings); uses no kernel interfaces beyond those 1.0.0 needs, which builds on Debian 13 (6.12) and Arch Linux (7.2) |
 | 1.0.2 helper autostart | Gentoo with systemd, KDE Plasma (Wayland): udev rule and user service start the helper on plug-in and end it cleanly on unplug |
 | 1.0.1 builds | Linux 6.18.59 (`W=1`, no warnings); uses no kernel interfaces beyond those 1.0.0 needs, which builds on Debian 13 (6.12) and Arch Linux (7.2) |
@@ -153,7 +156,10 @@ experimental *secondary* output, `jpeg_quality=`), **but the 60 fps primary outp
 JPEG was not necessary to reach 60 fps here: NV12 already cuts the data by about 62 %, and the CPU cost of JPEG
 encoding at 1080p60 would be higher than the SIMD NV12 conversion. The "compression" in this design is
 therefore the **chroma subsampling of NV12**, not a lossy entropy coder.
-The kernel only exports a frame when the desktop reports an update, and a periodic keepalive (every 2 s, `keepalive_ms`) resends the last frame so the chip does not blank a static picture. The vendor Windows driver sends no keepalive but reads the device's interrupt endpoint, which this driver now also does; whether the keepalive is still needed is one of the open hardware tests.
+The kernel only exports a frame when the desktop reports an update. Like the vendor Windows driver, it sends nothing
+while the picture is static: six monitors kept their picture for 59 to 88 s without a single frame (1.0.4 entry in
+the [Changelog](#changelog)). A periodic keepalive that resends the last frame is still available with
+`keepalive_ms=2000` for a monitor that blanks a static picture.
 
 ### 5. Buffering ("dual/triple buffering") at four levels
 
@@ -219,14 +225,17 @@ cd trigger6-kernel-module
 
 ```bash
 cd kernel
-make                                    # builds trigger6.ko for the running kernel
-sudo modprobe -a drm_kms_helper drm_shmem_helper   # insmod does not load dependencies
-sudo insmod ./trigger6.ko primary_userspace_nv12=1
+make                                    # builds trigger6.ko for the running kernel (as your user)
+sudo make load                          # loads the dependencies, then insmod with primary_userspace_nv12=1
+sudo make unload                        # rmmod trigger6
 ```
 
-`insmod` loads only this one file. If `drm_shmem_helper` is not loaded yet, it fails with `Unknown symbol in module`
-(`dmesg` names `drm_gem_shmem_dumb_create`), hence the `modprobe` line. An installed module (section B) loads its
-dependencies by itself with `modprobe trigger6`.
+`make load` takes other module parameters with `PARAMS`, for example
+`sudo make load PARAMS="primary_userspace_nv12=1 keepalive_ms=2000"`. It exists because `insmod` loads only this one
+file: if `drm_shmem_helper` is not loaded yet, a plain `insmod` fails with `Unknown symbol in module` (`dmesg` names
+`drm_gem_shmem_dumb_create`). By hand, the same is
+`sudo modprobe -a drm_kms_helper drm_shmem_helper && sudo insmod ./trigger6.ko primary_userspace_nv12=1`.
+An installed module (section B) loads its dependencies by itself with `modprobe trigger6`.
 
 On a kernel that only accepts signed modules (Secure Boot, `CONFIG_MODULE_SIG_FORCE`, lockdown), sign the module
 before `insmod`, with the key your kernel was built with, and again after every rebuild:
@@ -237,7 +246,7 @@ modinfo -F signer trigger6.ko           # prints the key's name when signed
 ```
 
 For a different kernel use `make KVER=<version>`. To unload: stop the helper, switch the output off (Xorg:
-`xrandr --output <T6 output> --off`; Wayland: in the display settings), then `sudo rmmod trigger6`. Some desktops hold the device open. If `rmmod` says
+`xrandr --output <T6 output> --off`; Wayland: in the display settings), then `sudo make unload` (or `sudo rmmod trigger6`). Some desktops hold the device open. If `rmmod` says
 "in use", first unbind it: `echo 2-2:1.0 | sudo tee /sys/bus/usb/drivers/trigger6/unbind` (use the interface
 name shown under `/sys/bus/usb/drivers/trigger6/`) and retry after a second or two.
 
@@ -247,7 +256,7 @@ name shown under `/sys/bus/usb/drivers/trigger6/`) and retry after a second or t
 sudo apt install dkms build-essential linux-headers-amd64 libyuv0   # Debian 13
 sudo pacman -S --needed dkms base-devel linux-headers libyuv        # Arch (linux-lts-headers for the LTS kernel)
 
-VER=1.0.3
+VER=1.0.4
 sudo mkdir -p /usr/src/trigger6-$VER
 sudo cp -r kernel dkms.conf LICENSE README.md /usr/src/trigger6-$VER/
 sudo dkms add     -m trigger6 -v $VER
@@ -261,7 +270,7 @@ sudo modprobe trigger6
 `dkms.conf` is in the repository root (an identical copy is in `packaging/debian13/`) and is copied along as shown.
 DKMS then rebuilds the module for each newly installed kernel. Remember that matching headers must be installed.
 `trigger6.conf` sets `primary_userspace_nv12=1`, so the module uses the fast helper whenever it runs.
-Check the installed version with `modinfo -F version trigger6` (prints `1.0.3`).
+Check the installed version with `modinfo -F version trigger6` (prints `1.0.4`).
 
 ### C. Install the helper
 
@@ -337,10 +346,10 @@ cat /sys/bus/usb/devices/*:1.0/t6_metrics        # frames, bytes, bulk errors, t
 | `primary_partial_updates` | `0` | Experimental partial VRAM writes. Off for stability |
 | `frame_min_interval_ms` | `0` | Extra wait between frames (USB time still limits speed) |
 | `jpeg_quality` | `40` | Only for the JPEG path of the experimental secondary head |
-| `experimental_secondary_raw` | `0` | Experimental second output |
+| `experimental_secondary_raw` | `0` | Experimental second output (only on adapters that report two outputs) |
 | `serialize_usb_bus` | `1` | Serialise USB writes across devices |
 | `manual_only` | `0` | Do not push frames automatically |
-| `keepalive_ms` | `2000` | Resend the last frame after this many idle ms (100-10000); `0` switches the keepalive off |
+| `keepalive_ms` | `0` | Resend the last frame after this many idle ms (100-10000); `0` (default since 1.0.4) sends nothing while the picture is static. Set `2000` (the old default) if a monitor blanks a static picture |
 
 Set one at load time with `modprobe trigger6 name=value`.
 
@@ -349,7 +358,7 @@ Set one at load time with `modprobe trigger6 name=value`.
 * **No output / black screen after plug-in:** re-activate the output with `xrandr` (Xorg) or the display settings (Wayland). After a re-enumeration the device number changes, so the helper must pick up the new node (it does when restarted).
 * **Stutter when moving the mouse:** make sure `trigger6-fast` is actually running (`pgrep -a trigger6`). Without it you only get the in-kernel fallback.
 * **`insmod: File exists` / `rmmod: in use`:** unbind the interface first (see section A).
-* **`insmod: ... Unknown symbol in module`:** a dependency is not loaded. Run `modprobe -a drm_kms_helper drm_shmem_helper`
+* **`insmod: ... Unknown symbol in module`:** a dependency is not loaded. Use `sudo make load`, or run `modprobe -a drm_kms_helper drm_shmem_helper`
   first (see section A).
 * **`insmod: ... Key was rejected by service`:** the kernel only accepts signed modules; sign it (see section A).
 * **Build fails with an unknown DRM symbol:** please report the exact kernel version. The code detects `drm_atomic_commit` and `drm_dev_set_dma_dev` from the headers, but other API differences may exist.
@@ -357,6 +366,10 @@ Set one at load time with `modprobe trigger6 name=value`.
 * **Xorg crashes (SIGSEGV) when the USB adapter is unplugged:** this is the X server failing on the removal of a
   video device, not a kernel crash; see [Limitations](#limitations). Use a Wayland session if the adapter is
   unplugged while the desktop runs. Unplugging only the HDMI cable is safe on both.
+* **The monitor goes black or flickers while the picture does not change:** the adapter sends nothing while the
+  desktop is static (since 1.0.4), and none of the tested monitors minded. If yours does, turn the keepalive back on:
+  `echo 2000 | sudo tee /sys/module/trigger6/parameters/keepalive_ms` takes effect at once; for the next load add
+  `keepalive_ms=2000` to the `options trigger6` line in `/etc/modprobe.d/trigger6.conf`. Please report the monitor.
 * **Output disappears after a USB error** (`Halting T6 frame traffic on output 0` in `dmesg`): the driver re-enables
   the output automatically after about 60 s and puts the last picture back. A bulk timeout instead resets the USB
   device, which reloads the driver, so the helper must be restarted (the systemd user service does this).
@@ -387,6 +400,60 @@ Set one at load time with `modprobe trigger6 name=value`.
   and recovery from a USB transport fault (step 7, no clean way to cause one).
 
 ## Changelog
+
+### 1.0.4 (2026-11-05)
+
+Upgrading an existing DKMS install: run `dkms remove trigger6/1.0.3 --all`, then install `1.0.4` as in
+[section B](#b-permanent-install-with-dkms-debian-13--ubuntu--arch). The helper and its service are unchanged since
+1.0.2. Includes everything from `1.0.3` below. Note the new default `keepalive_ms=0` (item 35).
+
+**Testing status, stated plainly:** builds without warnings (`W=1`) against Linux 6.18.59. Tested on the adapter
+(single HDMI output) with a Dell P2725HE under KDE Plasma (Wayland) on Gentoo, Linux 6.18.59: the driver reports
+"Device information: 1 output (output 0: type 8, 30 modes; output 1 not present)" and "T6 display ready with 1
+output"; only one DRM connector exists; the large-allocation total (`VmallocUsed`) was about 32 MB lower than with
+1.0.3; no control request at all went to the adapter in 15 s with the monitor connected (1.0.3 polled both outputs
+every 5 s); an HDMI unplug/replug was detected through the adapter's interrupt events; clean picture, helper
+running, no errors. Event flag `0x10` (item 33) has not occurred in any test or in the vendor capture. `make load`
+and `make unload` (item 34) were used for these tests. Six monitors kept their picture without keepalive (item 35).
+
+32. **The absent second output was set up anyway** (`t6_read_device_info`, probe, reprobe, chip init). The driver
+    always modelled two outputs: about 31 MB of buffers, a second DRM connector, CRTC and plane, a 0.5 s wait for
+    a monitor on the missing output at every plug-in, and a status poll of both outputs every 5 s for as long as
+    the adapter stayed plugged in, because output 1 never reported a monitor. Its "mode table" request returned
+    unrelated data. The vendor driver reads a 112-byte device information block (request `0xB3`, signature
+    `DISP`, `T6InDisp.dll` 0x1800fb480) and enables an output only when the low 4 bits of its u32 at byte
+    88 + 4 * output are set; bits 8-15 give that output's mode table length. This adapter reports `0x00701e08` for
+    output 0 (type 8, 30 entries) and 0 for output 1; the dual-output adapter in the vendor capture reports
+    `0x04301e01` for output 1, which is why the vendor capture has two real mode tables. *Fix:* the driver reads
+    the block at probe and only probes, allocates, registers and polls the outputs it lists, and reads exactly the
+    reported number of mode table entries. Without a valid block it keeps the old two-output behaviour. The gamma
+    table reset at chip init still covers both pipes of the chip, as tested.
+33. **Event flag `0x10` was not handled** (`t6_int_event`, `t6_resend_work`). The vendor driver's handler
+    (`T6InDisp.dll` 0x1800f5448) marks every active output "resend the current frame", the same flag it sets after
+    a failed frame transfer, and releases threads that wait on the adapter. This driver never waits on the adapter,
+    so only the resend applies: on `0x10` it resends the last frame of every active output, as after fault
+    recovery, from a work item, logs "T6 event 0x10: resending the current picture" and counts it as `int_wake=`
+    in `t6_metrics`.
+34. **Quick test needed the dependencies loaded by hand** (`kernel/Makefile`). *Fix:* `make load` loads the
+    modules `modinfo` lists as dependencies and then runs `insmod` with `PARAMS` (default
+    `primary_userspace_nv12=1`); `make unload` runs `rmmod trigger6`.
+35. **Keepalive on by default** (`keepalive_ms`). Since 1.0.0 the driver resent the last frame every 2 s on a static
+    desktop, a full 3 MB frame over USB, although the vendor driver sends none (8 s without frames in its capture).
+    Tested with `keepalive_ms=0` on six monitors, each left static after plug-in while the frame counters were
+    sampled once a second:
+
+    | Monitor | Mode | Longest stretch without any frame | Picture |
+    |---|---|---|---|
+    | Dell P2725HE | 1920x1080 | 88 s | kept |
+    | Dell P2319H | 1920x1080 | 74 s | kept |
+    | Dell P2726HE | 1920x1080 | 70 s | kept |
+    | iiyama PL2595W | 1920x1200 | 82 s | kept |
+    | Dell P2317H | 1920x1080 | 59 s | kept |
+    | HP E233 | 1920x1080 | 75 s | kept |
+
+    The Dell P2725HE had earlier kept its picture for 155 s as well. *Fix:* `keepalive_ms` now defaults to 0. The
+    parameter stays: `keepalive_ms=2000` restores the old behaviour (see [Troubleshooting](#troubleshooting)).
+    Resends after a transport fault, resume or event flag `0x10` do not depend on it.
 
 ### 1.0.3 (2026-11-05)
 
@@ -569,7 +636,7 @@ Each item below is backed by the USB capture of the vendor driver and/or static 
 * The second logical output is still allocated (about 31 MB) and polled every 5 s on single-output adapters. The
   USB ID does not say whether the board has one or two outputs, so this needs a probe-time capability check first.
 
-#### Hardware test checklist (0.9.0-r9 to 1.0.3 changes)
+#### Hardware test checklist (0.9.0-r9 to 1.0.4 changes)
 
 Result so far: fully working on Wayland; on Xorg, unplugging the USB adapter crashes the X server (see
 [Limitations](#limitations)). Confirmed on the adapter: steps 1, 2, 3 (the monitor went to standby and stayed
@@ -598,7 +665,7 @@ settings (on KDE Plasma: `kscreen-doctor`) instead.
 10. Colours look right: compare with the same image on another output (item 17).
 11. `t6_metrics`: `int_running=1`, and `head0 flips_done` grows with `sent_frames` (item 18). Report any `T6 event`
     lines in `dmesg`, especially around monitor unplug/replug: they are unknown event types.
-12. Reload with `keepalive_ms=0` and leave a static desktop for a few minutes: does the picture blank (item 18)?
+12. Leave a static desktop for a few minutes with the default `keepalive_ms=0`: does the picture blank (items 18, 35)?
 13. `xrandr` lists the adapter's modes (for example 1920x1080@50, 1680x1050); switch to a few and back (items 21-23).
 14. No audio device is expected; check that the monitor does not report an audio stream or show audio artefacts (item 20).
 
@@ -730,6 +797,7 @@ original companion tools goes to the original author. The copyright notice
 * The user-space SIMD bridge (`trigger6_bridge.h`, `trigger6-fast`), the asynchronous two-URB USB path and the removal of per-frame copies.
 * `0.9.0-r9`: review fixes for fault recovery, probe error handling, output switch-off, suspend/resume, mode handling and the helper, plus corrected 1080p timing and colour data.
 * `1.0.0`: init and mode-set sequence, interrupt endpoint, the adapter's own mode table and sync encoding (see [Changelog](#changelog)).
+* `1.0.4`: only the outputs the adapter reports (request `0xB3`), so single-output adapters no longer carry a second output; event flag `0x10` resends the picture; keepalive off by default; `make load` / `make unload`.
 * `1.0.3`: the monitor's own EDID timings, built as the vendor driver builds its custom modes, so 1920x1200 monitors get their native mode.
 * `1.0.2`: the helper ends cleanly when the adapter is unplugged instead of being restarted every 2 s.
 * `1.0.1`: interrupt events decoded as the vendor driver does (flip done, monitor hotplug), modes filtered by the monitor's EDID, and no second chip init at plug-in.

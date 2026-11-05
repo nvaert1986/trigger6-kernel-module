@@ -60,7 +60,7 @@
 #define T6_INT_FLAG_STATUS_OUT0	0x01	/* monitor connection changed */
 #define T6_INT_FLAG_STATUS_OUT1	0x02
 #define T6_INT_FLAG_FLIP_DONE	0x04
-#define T6_INT_FLAG_WAKE	0x10	/* vendor driver wakes every output */
+#define T6_INT_FLAG_WAKE	0x10	/* resend the current picture */
 
 /* USB control-message timeout (ms) — kept short to speed probe */
 #define T6_USB_CTRL_TIMEOUT_MS	1000
@@ -83,6 +83,15 @@
 #define T6_REQ_GET_STATUS	0x87
 #define T6_REQ_GET_RAM		0x88
 #define T6_REQ_GET_RES_TABLE	0x89	/* wValue=output, wIndex=byte offset */
+/*
+ * Device information block (112 bytes, starts with "DISP"), read by the
+ * vendor driver at start-up (T6InDisp.dll 0x1800fb480). u32 per output at
+ * byte 88 + 4 * output: low 4 bits = output type (0 = no output), bits
+ * 8-15 = number of entries in that output's mode table.
+ */
+#define T6_REQ_GET_DEVICE_INFO	0xB3
+#define T6_DEVICE_INFO_SIZE	112
+#define T6_DEVICE_INFO_OUTPUTS	88
 
 /* Device mode table: 32-byte timing entries, read in 512-byte chunks */
 #define T6_RES_ENTRY_SIZE	32
@@ -136,8 +145,11 @@ struct t6_frame_damage {
 #define T6_USB_XFER_CHUNK_SIZE	0xffc00
 #define T6_USB_XFER_TIMEOUT_MS	5000
 
-/* Keepalive: re-send last frame to prevent blanking (module param keepalive_ms) */
-#define T6_KEEPALIVE_INTERVAL_MS	2000
+/*
+ * Keepalive: resend the last frame after this many idle ms (module parameter
+ * keepalive_ms). Off by default; 2000 was the old default.
+ */
+#define T6_KEEPALIVE_DEFAULT_MS	0
 #define T6_BOOT_KEEPALIVE_INTERVAL_MS	1500
 
 /* Auto-recovery: clear io_faulted and reprobe after this delay */
@@ -352,6 +364,10 @@ struct t6_device {
 	/* Shared chip info */
 	u32 ram_mb;
 	struct t6_head heads[T6_OUTPUT_COUNT];
+	/* Outputs the adapter has (request 0xB3); 2 if it does not say. */
+	unsigned int output_count;
+	/* Mode table entries per output from request 0xB3; 0 = not known. */
+	u8 table_entries[T6_OUTPUT_COUNT];
 
 	/* Interrupt IN endpoint (0x83): flip-done and other device events */
 	struct urb *int_urb;
@@ -364,6 +380,9 @@ struct t6_device {
 	bool probed;			/* probe finished: reprobe may run */
 	atomic64_t int_events;
 	atomic64_t int_hotplug;
+	atomic64_t int_wake;
+	/* Interrupt flag 0x10: resend the current picture (process context). */
+	struct work_struct resend_work;
 	atomic64_t int_unknown;
 	atomic64_t int_errors;
 

@@ -221,11 +221,12 @@ MODULE_PARM_DESC(manual_only,
 
 /*
  * The vendor Windows driver sends no keepalive frames (an 8 s idle gap in
- * its USB capture) but services the interrupt endpoint, which this driver
- * now does as well. Keep the keepalive on by default until hardware tests
- * show it is no longer needed; keepalive_ms=0 switches it off.
+ * its USB capture). Off by default since six monitors kept their picture
+ * for 59 to 88 s without a single frame; keepalive_ms=2000 restores the old
+ * behaviour for a monitor that blanks a static picture. Resends after a
+ * fault, resume or event flag 0x10 do not depend on this setting.
  */
-static unsigned int t6_keepalive_ms = T6_KEEPALIVE_INTERVAL_MS;
+static unsigned int t6_keepalive_ms = T6_KEEPALIVE_DEFAULT_MS;
 
 static int t6_keepalive_ms_set(const char *val, const struct kernel_param *kp)
 {
@@ -254,7 +255,7 @@ static const struct kernel_param_ops t6_keepalive_ms_ops = {
 module_param_cb(keepalive_ms, &t6_keepalive_ms_ops, NULL, 0644);
 MODULE_PARM_DESC(keepalive_ms,
 		 "Resend the last frame after this many idle milliseconds (100-10000, 0 = off, default: "
-		 __stringify(T6_KEEPALIVE_INTERVAL_MS) ")");
+		 __stringify(T6_KEEPALIVE_DEFAULT_MS) "; 2000 if a monitor blanks a static picture)");
 
 /* Re-arm the keepalive timer, unless keepalive_ms=0. */
 static void t6_arm_keepalive(struct t6_head *head)
@@ -826,7 +827,7 @@ static ssize_t t6_metrics_show(struct device *dev,
 	if (len >= PAGE_SIZE - 256)
 		return len;
 	len += sysfs_emit_at(buf, len,
-		"device bulk_calls=%lld bulk_chunks=%lld bulk_bytes=%lld bulk_errors=%lld bulk_short_writes=%lld tx_work_runs=%lld tx_work_empty=%lld tx_adapter_defers=%lld last_bulk_us=%llu max_bulk_us=%llu last_bulk_bytes=%zu int_running=%u int_events=%lld int_hotplug=%lld int_unknown=%lld int_errors=%lld\n",
+		"device bulk_calls=%lld bulk_chunks=%lld bulk_bytes=%lld bulk_errors=%lld bulk_short_writes=%lld tx_work_runs=%lld tx_work_empty=%lld tx_adapter_defers=%lld last_bulk_us=%llu max_bulk_us=%llu last_bulk_bytes=%zu int_running=%u int_events=%lld int_hotplug=%lld int_wake=%lld int_unknown=%lld int_errors=%lld\n",
 		(long long)atomic64_read(&t6->metrics.bulk_calls),
 		(long long)atomic64_read(&t6->metrics.bulk_chunks),
 		(long long)atomic64_read(&t6->metrics.bulk_bytes),
@@ -841,10 +842,11 @@ static ssize_t t6_metrics_show(struct device *dev,
 		READ_ONCE(t6->int_running),
 		(long long)atomic64_read(&t6->int_events),
 		(long long)atomic64_read(&t6->int_hotplug),
+		(long long)atomic64_read(&t6->int_wake),
 		(long long)atomic64_read(&t6->int_unknown),
 		(long long)atomic64_read(&t6->int_errors));
 
-	for (i = 0; i < T6_OUTPUT_COUNT; i++) {
+	for (i = 0; i < t6->output_count; i++) {
 		struct t6_head *head = t6_get_head(t6, i);
 
 		if (len >= PAGE_SIZE - 256)
@@ -938,7 +940,7 @@ static ssize_t t6_metrics_reset_store(struct device *dev,
 		return -EINVAL;
 
 	t6_reset_device_metrics(t6);
-	for (i = 0; i < T6_OUTPUT_COUNT; i++)
+	for (i = 0; i < t6->output_count; i++)
 		t6_reset_head_metrics(t6_get_head(t6, i));
 
 	return count;
@@ -973,7 +975,7 @@ static ssize_t t6_head_enable_store(struct device *dev,
 	if (!t6)
 		return -ENODEV;
 	if (sscanf(buf, "%u %u", &head_idx, &enable) != 2 ||
-	    head_idx >= T6_OUTPUT_COUNT || enable > 1)
+	    head_idx >= t6->output_count || enable > 1)
 		return -EINVAL;
 
 	head = t6_get_head(t6, head_idx);
@@ -1286,7 +1288,7 @@ static int t6_alloc_head_buffers(struct t6_device *t6)
 	t6->bulk_urb[1] = usb_alloc_urb(0, GFP_KERNEL);
 	/* Missing async resources only disable the overlap, not the driver. */
 
-	for (idx = 0; idx < T6_OUTPUT_COUNT; idx++) {
+	for (idx = 0; idx < t6->output_count; idx++) {
 		struct t6_head *head = t6_get_head(t6, idx);
 		u32 frame_size;
 
@@ -1493,11 +1495,11 @@ static struct t6_head *t6_pick_next_pending_head_locked(struct t6_device *t6,
 {
 	unsigned int i;
 
-	for (i = 0; i < T6_OUTPUT_COUNT; i++) {
+	for (i = 0; i < t6->output_count; i++) {
 		struct t6_head *candidate;
 		enum t6_tx_defer_reason reason;
 
-		candidate = t6_get_head(t6, (t6->tx_next_head + i) % T6_OUTPUT_COUNT);
+		candidate = t6_get_head(t6, (t6->tx_next_head + i) % t6->output_count);
 		if (!t6_head_has_pending_activity_locked(candidate))
 			continue;
 		if (skip_head_deferred &&
@@ -1889,24 +1891,82 @@ static int t6_bulk_write(struct t6_device *t6, const void *src, size_t len)
  * takes the entry count from its own host-side list and never sends 0x84,
  * so stop at a short read, an error or the first implausible entry.
  */
+/*
+ * Which outputs the adapter has (request 0xB3, read by the vendor driver at
+ * start-up, T6InDisp.dll 0x1800fb480): it enables an output when the low 4
+ * bits of its u32 at byte 88 + 4 * output are set. A single-output adapter
+ * reports 0 for output 1; the dual-output adapter in the vendor capture
+ * reports 0x04301e01. Bits 8-15 give the output's mode table length (30 on
+ * both). Without a valid block, keep the old assumption of two outputs.
+ */
+static void t6_read_device_info(struct t6_device *t6)
+{
+	u8 *info = kzalloc(T6_DEVICE_INFO_SIZE, GFP_KERNEL);
+	unsigned int i, present = 0;
+	u32 out[T6_OUTPUT_COUNT] = { 0 };
+	int ret;
+
+	t6->output_count = T6_OUTPUT_COUNT;
+	if (!info)
+		return;
+	ret = t6_ctrl_in(t6, T6_REQ_GET_DEVICE_INFO, 0, 0, info,
+			 T6_DEVICE_INFO_SIZE);
+	if (ret < T6_DEVICE_INFO_SIZE || memcmp(info, "DISP", 4)) {
+		dev_info(&t6->udev->dev,
+			 "No device information block (%d); assuming %u outputs\n",
+			 ret, T6_OUTPUT_COUNT);
+		kfree(info);
+		return;
+	}
+	for (i = 0; i < T6_OUTPUT_COUNT; i++) {
+		__le32 v;
+
+		memcpy(&v, info + T6_DEVICE_INFO_OUTPUTS + 4 * i, sizeof(v));
+		out[i] = le32_to_cpu(v);
+		if (!(out[i] & 0xf))
+			break;
+		t6->table_entries[i] = (out[i] >> 8) & 0xff;
+		present++;
+	}
+	kfree(info);
+	if (!present) {
+		dev_warn(&t6->udev->dev,
+			 "Device information lists no outputs; assuming %u\n",
+			 T6_OUTPUT_COUNT);
+		return;
+	}
+	t6->output_count = present;
+	dev_info(&t6->udev->dev,
+		 "Device information: %u output%s (output 0: type %u, %u modes%s)\n",
+		 present, present == 1 ? "" : "s", out[0] & 0xf,
+		 t6->table_entries[0],
+		 present > 1 ? "" : "; output 1 not present");
+}
+
 static void t6_read_mode_table(struct t6_device *t6, struct t6_head *head)
 {
-	const unsigned int max = T6_RES_MAX_ENTRIES * T6_RES_ENTRY_SIZE;
+	unsigned int entries = t6->table_entries[head->output_idx];
+	unsigned int max = T6_RES_MAX_ENTRIES * T6_RES_ENTRY_SIZE;
 	unsigned int got = 0, i;
 	u8 *buf;
 
+	/* With the count from request 0xB3, read exactly that, as the vendor does. */
+	if (entries && entries <= T6_RES_MAX_ENTRIES)
+		max = entries * T6_RES_ENTRY_SIZE;
 	/* drmm: the connector reads this until the DRM device is released. */
 	buf = drmm_kzalloc(&t6->drm, max, GFP_KERNEL);
 	if (!buf)
 		return;
 	while (got < max) {
+		unsigned int len = min_t(unsigned int, T6_RES_CHUNK_SIZE,
+					 max - got);
 		int ret = t6_ctrl_in(t6, T6_REQ_GET_RES_TABLE, head->output_idx,
-				     got, buf + got, T6_RES_CHUNK_SIZE);
+				     got, buf + got, len);
 
 		if (ret <= 0)
 			break;
 		got += ret;
-		if (ret < T6_RES_CHUNK_SIZE)
+		if (ret < len)
 			break;
 	}
 
@@ -1969,7 +2029,7 @@ static int t6_chip_init(struct t6_device *t6, bool read_tables)
 	int ret;
 	bool any_connected = false;
 
-	for (idx = 0; idx < T6_OUTPUT_COUNT; idx++) {
+	for (idx = 0; idx < t6->output_count; idx++) {
 		if (t6_get_head(t6, idx)->connected) {
 			init_head[idx] = true;
 			any_connected = true;
@@ -1983,6 +2043,7 @@ static int t6_chip_init(struct t6_device *t6, bool read_tables)
 			  t6_init_color, sizeof(t6_init_color));
 	if (ret < 0)
 		return ret;
+	/* Both pipes of the chip, also on single-output adapters (tested). */
 	for (idx = 0; idx < T6_OUTPUT_COUNT; idx++) {
 		ret = t6_ctrl_out(t6, T6_REQ_LUT_CTRL,
 				  (idx << 8) | T6_LUT_OP_RESET, 0, NULL, 0);
@@ -1995,10 +2056,10 @@ static int t6_chip_init(struct t6_device *t6, bool read_tables)
 
 	/* Once, at probe: get_modes reads these tables without locking. */
 	if (read_tables)
-		for (idx = 0; idx < T6_OUTPUT_COUNT; idx++)
+		for (idx = 0; idx < t6->output_count; idx++)
 			t6_read_mode_table(t6, t6_get_head(t6, idx));
 
-	for (idx = 0; idx < T6_OUTPUT_COUNT; idx++) {
+	for (idx = 0; idx < t6->output_count; idx++) {
 		struct t6_head *head = t6_get_head(t6, idx);
 		const u8 *blob;
 
@@ -2041,7 +2102,7 @@ static int t6_chip_init(struct t6_device *t6, bool read_tables)
 	if (ret < 0)
 		return ret;
 
-	for (idx = 0; idx < T6_OUTPUT_COUNT; idx++) {
+	for (idx = 0; idx < t6->output_count; idx++) {
 		if (!init_head[idx])
 			continue;
 		ret = t6_load_identity_lut(t6, t6_get_head(t6, idx));
@@ -2049,7 +2110,7 @@ static int t6_chip_init(struct t6_device *t6, bool read_tables)
 			return ret;
 	}
 
-	for (idx = 0; idx < T6_OUTPUT_COUNT; idx++)
+	for (idx = 0; idx < t6->output_count; idx++)
 		if (init_head[idx])
 			t6->init_mask |= BIT(idx);
 	return 0;
@@ -3030,6 +3091,25 @@ static void t6_resend_last_frame(struct t6_head *head)
 		t6_queue_head_tx_work(head);
 }
 
+/* Interrupt flag 0x10: put the current picture back on every active output. */
+static void t6_resend_work(struct work_struct *work)
+{
+	struct t6_device *t6 = container_of(work, struct t6_device,
+					    resend_work);
+	unsigned int idx;
+	int enter_idx;
+
+	if (!drm_dev_enter(&t6->drm, &enter_idx))
+		return;
+	for (idx = 0; idx < t6->output_count; idx++) {
+		struct t6_head *head = t6_get_head(t6, idx);
+
+		if (READ_ONCE(head->crtc_active))
+			t6_resend_last_frame(head);
+	}
+	drm_dev_exit(enter_idx);
+}
+
 static void t6_trip_transport_fault(struct t6_device *t6,
 					 struct t6_head *head,
 					 int ret,
@@ -3119,7 +3199,7 @@ static bool t6_any_head_disconnected(struct t6_device *t6)
 {
 	unsigned int idx;
 
-	for (idx = 0; idx < T6_OUTPUT_COUNT; idx++) {
+	for (idx = 0; idx < t6->output_count; idx++) {
 		if (!t6_get_head(t6, idx)->connected)
 			return true;
 	}
@@ -3155,7 +3235,7 @@ static void t6_reprobe_work(struct work_struct *work)
 	 * compositor see the connector again.
 	 */
 	WRITE_ONCE(t6->io_faulted, false);
-	for (idx = 0; idx < T6_OUTPUT_COUNT; idx++) {
+	for (idx = 0; idx < t6->output_count; idx++) {
 		struct t6_head *head = t6_get_head(t6, idx);
 		unsigned long due;
 
@@ -3180,7 +3260,7 @@ static void t6_reprobe_work(struct work_struct *work)
 			 head->output_idx, head->io_last_error);
 	}
 
-	for (idx = 0; idx < T6_OUTPUT_COUNT; idx++) {
+	for (idx = 0; idx < t6->output_count; idx++) {
 		struct t6_head *head = t6_get_head(t6, idx);
 		bool was_connected = head->connected;
 		int old_width = head->width;
@@ -3226,7 +3306,7 @@ static void t6_reprobe_work(struct work_struct *work)
 			changed = true;
 	}
 
-	for (idx = 0; idx < T6_OUTPUT_COUNT; idx++) {
+	for (idx = 0; idx < t6->output_count; idx++) {
 		struct t6_head *head = t6_get_head(t6, idx);
 
 		t6_update_connector_status(head);
@@ -3256,7 +3336,7 @@ static void t6_reprobe_work(struct work_struct *work)
 	if (changed)
 		drm_kms_helper_hotplug_event(&t6->drm);
 
-	for (idx = 0; idx < T6_OUTPUT_COUNT; idx++) {
+	for (idx = 0; idx < t6->output_count; idx++) {
 		struct t6_head *head = t6_get_head(t6, idx);
 
 		if ((recovered & BIT(idx)) && READ_ONCE(head->crtc_active))
@@ -3446,7 +3526,7 @@ static void t6_frame_work(struct work_struct *work)
 	drm_dev_exit(idx);
 
 	head->tx_last_jiffies = jiffies;
-	t6->tx_next_head = (head->output_idx + 1) % T6_OUTPUT_COUNT;
+	t6->tx_next_head = (head->output_idx + 1) % t6->output_count;
 
 	if (ret) {
 		if (keepalive_due)
@@ -3908,7 +3988,7 @@ static const struct drm_driver t6_drm_driver = {
  * 0x20 events after start-up and hotplug) and tests the flags in byte 19 in
  * this order: 0x04 = frame displayed (fence id at byte 12), 0x01/0x02 =
  * monitor connection changed (it then re-reads status for each output),
- * 0x10 = wake every output. Byte 19 is not the flip command: on a single
+ * 0x10 = resend the current picture on every output. Byte 19 is not the flip command: on a single
  * output adapter every flip reports 0x04.
  * ------------------------------------------------------------------
  */
@@ -3950,6 +4030,23 @@ static void t6_int_event(struct t6_device *t6, const u8 *buf, unsigned int len)
 		 */
 		if (READ_ONCE(t6->probed) && !drm_dev_is_unplugged(&t6->drm))
 			mod_delayed_work(system_wq, &t6->reprobe_work, 0);
+		return;
+	}
+
+	if (flags & T6_INT_FLAG_WAKE) {
+		/*
+		 * The vendor driver marks every active output "resend the
+		 * current frame" (the same flag it sets after a failed send)
+		 * and releases threads waiting on the adapter
+		 * (T6InDisp.dll 0x1800f5448). This driver never waits on the
+		 * adapter, so only the resend applies; it takes mutexes, so
+		 * it runs from a work item.
+		 */
+		atomic64_inc(&t6->int_wake);
+		dev_info_ratelimited(&t6->udev->dev,
+				     "T6 event 0x10: resending the current picture\n");
+		if (READ_ONCE(t6->probed) && !drm_dev_is_unplugged(&t6->drm))
+			schedule_work(&t6->resend_work);
 		return;
 	}
 
@@ -4110,11 +4207,18 @@ static int t6_usb_probe(struct usb_interface *intf,
 		goto err_put;
 	}
 	dev_info(&intf->dev, "T6 RAM: %u MB\n", t6->ram_mb);
+	t6_read_device_info(t6);
 
-	for (head_idx = 0; head_idx < T6_OUTPUT_COUNT; head_idx++) {
+	/*
+	 * Every head gets its defaults (timers, work items and wait queues
+	 * are cancelled and woken for all of them), but only the outputs the
+	 * adapter has are probed, get buffers, DRM objects and device nodes.
+	 */
+	for (head_idx = 0; head_idx < T6_OUTPUT_COUNT; head_idx++)
+		t6_head_defaults(t6, t6_get_head(t6, head_idx), head_idx);
+	for (head_idx = 0; head_idx < t6->output_count; head_idx++) {
 		struct t6_head *head = t6_get_head(t6, head_idx);
 
-		t6_head_defaults(t6, head, head_idx);
 		ret = t6_probe_head(t6, head);
 		if (ret < 0)
 			dev_warn(&intf->dev,
@@ -4134,7 +4238,7 @@ static int t6_usb_probe(struct usb_interface *intf,
 		while (time_before(jiffies, deadline) &&
 		       t6_any_head_disconnected(t6)) {
 			msleep(T6_INITIAL_PROBE_RETRY_MS);
-			for (head_idx = 0; head_idx < T6_OUTPUT_COUNT;
+			for (head_idx = 0; head_idx < t6->output_count;
 			     head_idx++) {
 				struct t6_head *head =
 					t6_get_head(t6, head_idx);
@@ -4149,7 +4253,7 @@ static int t6_usb_probe(struct usb_interface *intf,
 		}
 	}
 
-	for (head_idx = 0; head_idx < T6_OUTPUT_COUNT; head_idx++) {
+	for (head_idx = 0; head_idx < t6->output_count; head_idx++) {
 		struct t6_head *head = t6_get_head(t6, head_idx);
 
 		if (!head->connected)
@@ -4164,6 +4268,7 @@ static int t6_usb_probe(struct usb_interface *intf,
 	t6->tx_next_head = 0;
 	/* Before the first goto err_buffers, which cancels this work. */
 	INIT_DELAYED_WORK(&t6->reprobe_work, t6_reprobe_work);
+	INIT_WORK(&t6->resend_work, t6_resend_work);
 	t6->reprobe_attempt = 0;
 
 	t6->wq = alloc_workqueue("t6_io", WQ_UNBOUND | WQ_MEM_RECLAIM, 0);
@@ -4196,7 +4301,7 @@ static int t6_usb_probe(struct usb_interface *intf,
 	 * visual appearance (both monitors come up closer together).
 	 * Matches the triggerdm reference implementation.
 	 */
-	for (head_idx = T6_OUTPUT_COUNT; head_idx-- > 0; ) {
+	for (head_idx = t6->output_count; head_idx-- > 0; ) {
 		struct t6_head *head = t6_get_head(t6, head_idx);
 		struct t6_flip_header fh;
 		struct t6_bulk_header bch;
@@ -4284,7 +4389,7 @@ static int t6_usb_probe(struct usb_interface *intf,
 	drm->mode_config.max_height = T6_MAX_HEIGHT;
 	drm->mode_config.preferred_depth = 32;
 
-	for (head_idx = 0; head_idx < T6_OUTPUT_COUNT; head_idx++) {
+	for (head_idx = 0; head_idx < t6->output_count; head_idx++) {
 		struct t6_head *head = t6_get_head(t6, head_idx);
 
 		ret = t6_connector_init(t6, head);
@@ -4337,7 +4442,7 @@ static int t6_usb_probe(struct usb_interface *intf,
 
 	drm_mode_config_reset(drm);
 
-	for (head_idx = 0; head_idx < T6_OUTPUT_COUNT; head_idx++) {
+	for (head_idx = 0; head_idx < t6->output_count; head_idx++) {
 		struct t6_head *head = t6_get_head(t6, head_idx);
 
 		t6_update_connector_status(head);
@@ -4349,14 +4454,14 @@ static int t6_usb_probe(struct usb_interface *intf,
 	if (t6_secondary_userspace_jpeg)
 		dev_warn(&intf->dev,
 			 "secondary_userspace_jpeg=1 forces the deprecated userspace JPEG feeder path for logical output 1\n");
-	else if (!t6_experimental_secondary_raw)
+	else if (!t6_experimental_secondary_raw && t6->output_count > 1)
 		dev_info(&intf->dev,
 			 "Logical output 1 uses native NV12 transport (BGRX->NV12 conversion with zero-damage skip)\n");
 	if (t6->manual_only)
 		dev_warn(&intf->dev,
 			 "manual_only=1 keeps DRM connectors disconnected and blocks automatic scanout; use this for the safest guarded live probes\n");
 
-	for (head_idx = 0; head_idx < T6_OUTPUT_COUNT; head_idx++) {
+	for (head_idx = 0; head_idx < t6->output_count; head_idx++) {
 		ret = t6_register_jpeg_device(t6_get_head(t6, head_idx));
 		if (ret)
 			goto err_jpeg;
@@ -4370,9 +4475,8 @@ static int t6_usb_probe(struct usb_interface *intf,
 	if (ret)
 		dev_warn(&intf->dev, "Failed to create sysfs group: %d\n", ret);
 
-	dev_info(&intf->dev,
-		 "T6 display ready with %u logical heads modeled\n",
-		 T6_OUTPUT_COUNT);
+	dev_info(&intf->dev, "T6 display ready with %u output%s\n",
+		 t6->output_count, t6->output_count == 1 ? "" : "s");
 	WRITE_ONCE(t6->probed, true);
 	if (t6_any_head_disconnected(t6))
 		t6_schedule_reprobe(t6);
@@ -4391,6 +4495,7 @@ err_buffers:
 	 */
 	t6_int_free(t6);
 	cancel_delayed_work_sync(&t6->reprobe_work);
+	cancel_work_sync(&t6->resend_work);
 	t6_cancel_head_activity(t6);
 	if (t6->wq) {
 		destroy_workqueue(t6->wq);
@@ -4436,6 +4541,7 @@ static void t6_usb_disconnect(struct usb_interface *intf)
 	/* Before reprobe_work: unknown events reschedule it. */
 	t6_int_stop(t6);
 	cancel_delayed_work_sync(&t6->reprobe_work);
+	cancel_work_sync(&t6->resend_work);
 	t6_cancel_head_activity(t6);
 	if (t6->wq) {
 		flush_workqueue(t6->wq);
@@ -4479,6 +4585,7 @@ static int t6_usb_suspend(struct usb_interface *intf, pm_message_t message)
 
 	t6_int_stop(t6);
 	cancel_delayed_work_sync(&t6->reprobe_work);
+	cancel_work_sync(&t6->resend_work);
 	t6_cancel_head_activity(t6);
 
 	return 0;
@@ -4496,7 +4603,7 @@ static int t6_usb_resume(struct usb_interface *intf)
 	/* Clear stale error state from before suspend */
 	WRITE_ONCE(t6->io_faulted, false);
 	t6->ctrl_error_count = 0;
-	for (hi = 0; hi < T6_OUTPUT_COUNT; hi++) {
+	for (hi = 0; hi < t6->output_count; hi++) {
 		struct t6_head *head = t6_get_head(t6, hi);
 
 		WRITE_ONCE(head->io_faulted, false);
@@ -4527,7 +4634,7 @@ static int t6_usb_resume(struct usb_interface *intf)
 	 * whose atomic_enable stops this keepalive and whose plane update
 	 * sends the real framebuffer.
 	 */
-	for (hi = 0; hi < T6_OUTPUT_COUNT; hi++) {
+	for (hi = 0; hi < t6->output_count; hi++) {
 		struct t6_head *head = t6_get_head(t6, hi);
 
 		if (!READ_ONCE(head->connected) || !head->last_jpeg_data)
@@ -4585,4 +4692,4 @@ MODULE_AUTHOR("Authentra / Ralph Friedman");
 MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_LICENSE("GPL");
 
-MODULE_VERSION("1.0.3");
+MODULE_VERSION("1.0.4");
