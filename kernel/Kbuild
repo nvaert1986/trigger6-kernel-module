@@ -1,4 +1,8 @@
 trigger6-y := trigger6_drv.o trigger6_connector.o trigger6_codec.o
+# HDMI audio needs ALSA PCM; without it the display works as before.
+ifneq ($(CONFIG_SND_PCM),)
+trigger6-y += trigger6_audio.o
+endif
 obj-m := trigger6.o
 
 # Detect the API from the target headers, including distro backports.
@@ -7,4 +11,7 @@ ccflags-y += -DT6_HAVE_DRM_ATOMIC_COMMIT
 endif
 ifneq ($(shell grep -c 'drm_dev_set_dma_dev' $(srctree)/include/drm/drm_device.h),0)
 ccflags-y += -DT6_HAVE_DRM_SET_DMA_DEV
+endif
+ifneq ($(shell grep -c 'void hrtimer_setup' $(srctree)/include/linux/hrtimer.h),0)
+ccflags-y += -DT6_HAVE_HRTIMER_SETUP
 endif

@@ -1,12 +1,18 @@
-# MCT Trigger 6 (T6) USB display driver for Linux, release `1.0.5`
+# MCT Trigger 6 (T6) USB display driver for Linux, release `1.1.0-beta1`
 
 An out-of-tree Linux DRM/KMS kernel driver and a small user-space helper for the
 MCT "T6 USB Station" chipset, as found in the **StarTech USB32HDES** USB 3.0 to HDMI adapter.
 This release reaches about **60 new frames per second at 1920x1080** on the tested
 setup, with a stable USB connection.
 
+> **New in 1.1.0-beta1: HDMI audio support.** The adapter now also appears as a sound card ("Trigger6 USB to HDMI
+> Adapter"). This is a **beta**: the audio was tested virtually (the sound card, PipeWire, the playback stream and
+> the USB transfers to the adapter were all checked) but is **physically untested**: nobody has heard it yet, as
+> none of the test monitors has speakers or an audio output. See the [1.1.0-beta1 entry](#110-beta1-2026-11-05).
+> Feedback from a monitor or TV with speakers is welcome. The display part is unchanged from 1.0.5.
+
 > **Status: experimental.** Tested on one adapter model (see
-> [Tested configuration](#tested-configuration)). Version 1.0.5 works on Wayland and builds on Arch Linux (kernel 7.2) and
+> [Tested configuration](#tested-configuration)). Version 1.1.0-beta1 works on Wayland and builds on Arch Linux (kernel 7.2) and
 > Debian 13 (kernel 6.12). **On Xorg, unplugging the USB adapter crashes the X server** (a bug in Xorg, reported to
 > Debian, see [Limitations](#limitations)); unplugging only the HDMI cable is fine. Use at your own risk.
 
@@ -45,6 +51,8 @@ setup, with a stable USB connection.
 | 1.0.0 start-up test | Gentoo, Linux 6.18.59 with enforced module signatures: plug-in, chip init, mode table and unplug checked against a USB capture (no monitor attached yet) |
 | 1.0.0 and 1.0.1 monitor test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), Dell P2725HE: picture, helper, mode switches, HDMI hotplug, flip-done events and `keepalive_ms=0`, checked against `t6_metrics` and a USB capture |
 | 1.0.3 monitor test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), seven monitors from three brands: each detected on plug-in, set to its native mode, clean picture, no errors |
+| 1.1.0-beta1 audio test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), PipeWire: sound card registered, playback through `aplay` and PipeWire, USB transfers checked with usbmon. **Not heard**: no monitor with speakers or audio output available |
+| 1.1.0-beta1 builds | Linux 6.18.59 (`W=1`, no warnings); not yet built on Debian 13 (6.12), where the audio code uses the older `hrtimer_init()` |
 | 1.0.5 monitor swap test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland): HP E233, iiyama PL2595W and Dell P2319H swapped on the running system; each started on its own preferred timing, no mode change by the desktop afterwards |
 | 1.0.5 builds | Linux 6.18.59 (`W=1`, no warnings); uses no kernel interfaces beyond those 1.0.0 needs, which builds on Debian 13 (6.12) and Arch Linux (7.2) |
 | 1.0.4 builds | Linux 6.18.59 (`W=1`, no warnings); uses no kernel interfaces beyond those 1.0.0 needs, which builds on Debian 13 (6.12) and Arch Linux (7.2) |
@@ -86,7 +94,7 @@ Caveats, stated plainly:
 
 | Path | What it is |
 |---|---|
-| `kernel/` | The DRM/KMS kernel module `trigger6.ko` (sources, `Makefile`, `Kbuild`) |
+| `kernel/` | The DRM/KMS kernel module `trigger6.ko` (sources, `Makefile`, `Kbuild`); `trigger6_audio.c` is the HDMI audio sound card |
 | `userspace/trigger6-fast.c` | The user-space SIMD helper `trigger6-fast` (NV12 conversion with libyuv), see [section C](#c-install-the-helper) |
 | `dkms.conf` | DKMS configuration, see [section B](#b-permanent-install-with-dkms-debian-13--ubuntu--arch) |
 | `packaging/debian13/trigger6-fast.service` | systemd **user** service that runs the helper, see [section D](#d-device-permissions-and-autostart-recommended) |
@@ -211,7 +219,8 @@ These measures were taken, and the long tests then ran without a reset:
 | Optional | `pahole` (BTF), `libyuv-dev` | |
 
 Kernel options required (default on Debian and Arch): `CONFIG_DRM`, `CONFIG_DRM_KMS_HELPER`,
-`CONFIG_DRM_GEM_SHMEM_HELPER`, `CONFIG_USB`.
+`CONFIG_DRM_GEM_SHMEM_HELPER`, `CONFIG_USB`. HDMI audio also needs `CONFIG_SND_PCM` (default on desktop kernels);
+without it the module builds and works without the sound card.
 Secure Boot systems must sign the module or enrol the DKMS key.
 
 ## Build and install
@@ -258,7 +267,7 @@ name shown under `/sys/bus/usb/drivers/trigger6/`) and retry after a second or t
 sudo apt install dkms build-essential linux-headers-amd64 libyuv0   # Debian 13
 sudo pacman -S --needed dkms base-devel linux-headers libyuv        # Arch (linux-lts-headers for the LTS kernel)
 
-VER=1.0.5
+VER=1.1.0-beta1
 sudo mkdir -p /usr/src/trigger6-$VER
 sudo cp -r kernel dkms.conf LICENSE README.md /usr/src/trigger6-$VER/
 sudo dkms add     -m trigger6 -v $VER
@@ -272,7 +281,7 @@ sudo modprobe trigger6
 `dkms.conf` is in the repository root (an identical copy is in `packaging/debian13/`) and is copied along as shown.
 DKMS then rebuilds the module for each newly installed kernel. Remember that matching headers must be installed.
 `trigger6.conf` sets `primary_userspace_nv12=1`, so the module uses the fast helper whenever it runs.
-Check the installed version with `modinfo -F version trigger6` (prints `1.0.5`).
+Check the installed version with `modinfo -F version trigger6` (prints `1.1.0-beta1`).
 
 ### C. Install the helper
 
@@ -351,6 +360,8 @@ cat /sys/bus/usb/devices/*:1.0/t6_metrics        # frames, bytes, bulk errors, t
 | `experimental_secondary_raw` | `0` | Experimental second output (only on adapters that report two outputs) |
 | `serialize_usb_bus` | `1` | Serialise USB writes across devices |
 | `manual_only` | `0` | Do not push frames automatically |
+| `audio` | `1` | Offer HDMI audio as an ALSA sound card when the adapter supports it; `0` leaves it out (load time only) |
+| `audio_lead_ms` | `90` | How far ahead of playback HDMI audio is sent (20-500 ms); also the latency the sound card reports |
 | `keepalive_ms` | `0` | Resend the last frame after this many idle ms (100-10000); `0` (default since 1.0.4) sends nothing while the picture is static. Set `2000` (the old default) if a monitor blanks a static picture |
 
 Set one at load time with `modprobe trigger6 name=value`.
@@ -368,6 +379,12 @@ Set one at load time with `modprobe trigger6 name=value`.
 * **Xorg crashes (SIGSEGV) when the USB adapter is unplugged:** this is the X server failing on the removal of a
   video device, not a kernel crash; see [Limitations](#limitations). Use a Wayland session if the adapter is
   unplugged while the desktop runs. Unplugging only the HDMI cable is safe on both.
+* **No sound from the monitor:** HDMI audio only plays while the adapter's output is on with a mode set, and the
+  monitor needs speakers or an audio output. Pick the sink "Trigger6 USB to HDMI Adapter" (PipeWire may still call
+  it "T6 USB Station Stereo") or ALSA card `Trigger6`; it is not made the default output. `dmesg` must show
+  `HDMI audio: 48 kHz, 16 bit, stereo (sound card N, ...)`, and the `audio` line of `t6_metrics` counts the packets
+  sent (`audio_packets`) and gaps filled with silence (`audio_fills`). A warning about less than 112 px horizontal
+  blanking means the current mode leaves HDMI too little room for audio: choose another mode.
 * **The monitor goes black or flickers while the picture does not change:** the adapter sends nothing while the
   desktop is static (since 1.0.4), and none of the tested monitors minded. If yours does, turn the keepalive back on:
   `echo 2000 | sudo tee /sys/module/trigger6/parameters/keepalive_ms` takes effect at once; for the next load add
@@ -387,7 +404,10 @@ Set one at load time with `modprobe trigger6 name=value`.
   the monitor lists, or outside its refresh and pixel clock limits, are left out (item 28): on a 1080p monitor with a
   48-100 Hz range that removes 1920x1200, 1600x1200 and 1920x1080@30. The monitor's own detailed timings are offered
   as well, up to 1920x1200, 60 Hz and the fastest clock in the adapter's table (item 31).
-* HDMI audio is not implemented.
+* HDMI audio (1.1.0-beta1, beta): playback only (48 kHz, 16-bit, stereo), as the adapter reports. Tested
+  virtually up to the USB transfers on the adapter, **physically untested** (not heard): none of the test monitors
+  has speakers or an audio output. The
+  monitor's audio capabilities (ELD) are not passed on, as the driver reads only the first EDID block.
 * NV12 uses 4:2:0 colour, so tiny coloured text is slightly less sharp than RGB.
 * The reported FPS is the number of frames sent. It is not a camera or analyser measurement of visible frames.
 * Only the StarTech USB32HDES / `0711:5601` was tested. Other MCT T6 products (including the 4-output USB-C models in the upstream project) are not covered by these measurements.
@@ -402,6 +422,48 @@ Set one at load time with `modprobe trigger6 name=value`.
   and recovery from a USB transport fault (step 7, no clean way to cause one).
 
 ## Changelog
+
+### 1.1.0-beta1 (2026-11-05)
+
+**Adds HDMI audio support. Beta: tested virtually, physically untested.** The minor version goes up because this is a
+new feature. Upgrading an existing DKMS install: run `dkms remove trigger6/1.0.5 --all`, then install `1.1.0-beta1`
+as in [section B](#b-permanent-install-with-dkms-debian-13--ubuntu--arch). The display part and the helper are
+unchanged since 1.0.5; to leave the sound card out, load the module with `audio=0`.
+
+**Testing status, stated plainly:** builds without warnings (`W=1`) against Linux 6.18.59. Checked on the adapter
+(StarTech USB32HDES) under KDE Plasma (Wayland) with PipeWire on Gentoo, Linux 6.18.59, **up to the USB transfers,
+not by ear**: none of the available monitors has speakers or an audio output.
+
+* The adapter reports one playback format, 48 kHz 16-bit stereo, a 128 KiB buffer and a volume node (0-31); the
+  driver registers the sound card and PipeWire offers it as a sink (not as the default output).
+* Recorded with usbmon while a 3 s 1 kHz tone played: `0x24` with activity 1 at the start, 32-byte session headers
+  with signature 3 and payload 1920 bytes (10 ms), one per 10 ms, `0x24` with activity 0 at the end.
+* With `aplay` directly on the card: 1 start, 300 packets for 3 s, no underrun. Through PipeWire, after the fix
+  below: one start, no underrun in 195 samples of the stream state, no silence fills, the engine switched off when
+  PipeWire suspended the sink. The picture kept running (no USB, send or event errors).
+
+37. **HDMI audio** (`trigger6_audio.c`). The adapter has no USB audio interface; the vendor's Windows bus driver
+    `t6sta.sys` presents an emulated USB Audio Class device to Windows and translates its stream into the T6
+    protocol. The protocol was decoded and verified by ear on a 0711:5600 adapter by the
+    [mct-linux](https://github.com/XXCoreRangerX/mct-linux) project (GPL-2.0-only), whose implementation this is a
+    port of: playback runs over the same bulk pipe as video, a 32-byte session header with signature 3 followed by
+    the PCM, paced by the host clock with 10 ms packets; `0x24` switches the engine on and off (activity, format
+    index, 9600, cyclic buffer size); `0xA5` lists the formats, `0xA4` gives the engine state, `0xA2`/`0xA3` the
+    volume node and `0x23` sets it. Cross-checked statically against `t6sta.sys`: it uses exactly these requests with
+    the same lengths (`0x23`/`0xA3` 40 bytes, `0x24`, `0xA1`, `0xA2`, `0xA4` 16 bytes, `0xA5` n * 32 bytes), its
+    answers for older firmware have the same layout (formats 44.1 and 48 kHz, 16-bit stereo), and the vendor capture's
+    "audio off" request has the same `0x24` layout. The signature-3 header itself could not be located statically
+    (the value is not an immediate); it is the part verified by ear in mct-linux.
+    The driver offers an ALSA sound card "Trigger6 USB to HDMI Adapter" (card ID `Trigger6`, one PCM playback
+    device, 48 kHz S16_LE stereo) with "PCM Playback Volume" and "PCM Playback Switch", sets the adapter's volume to
+    31 of 31 at start-up as Windows and macOS do (it powers up at 2), restarts the engine after a chip re-init (which
+    sends audio off), and reports `audio`, `audio_engine`, `audio_starts`, `audio_packets`, `audio_prefills` and
+    `audio_fills` in `t6_metrics`. New module parameters `audio` and `audio_lead_ms`.
+    **Change from mct-linux:** it took the whole 90 ms lead from the ALSA buffer at the start. PipeWire keeps about
+    100 ms queued, so it was left with a few ms of margin and ran into an underrun every 0.4 s (20 engine restarts
+    during a 3 s tone; `aplay` with its fuller buffer did not). The driver now sends the lead as silence first and
+    takes the application's audio at the rate it plays; the lead is reported as latency.
+
 
 ### 1.0.5 (2026-11-05)
 
@@ -419,9 +481,9 @@ under KDE Plasma (Wayland) on Gentoo, Linux 6.18.59, by swapping monitors on the
 | Dell P2319H to iiyama PL2595W | 1920x1200 @ 60 Hz, the iiyama's own | none |
 
 Each monitor showed its picture at once, without the black moment, and switching felt quicker; the brief desktop
-freeze when connecting a monitor no longer occurred. No USB, send or unknown-event errors. Not re-tested on 1.0.5:
-plugging the same monitor back in; for an identical EDID the driver takes the 1.0.4 path (restore the last timing),
-which was tested with an HDMI replug on 1.0.4.
+freeze when connecting a monitor no longer occurred. No USB, send or unknown-event errors. After the release the
+same-monitor case was checked as well: an HDMI replug of the Dell P2725HE showed no "new monitor" line and kept
+1920x1080@60.
 
 36. **A new monitor started on the previous monitor's timing** (`t6_adopt_monitor_timing`, `t6_probe_head`,
     chip init, `t6_reprobe_work`). Since 1.0.3 the driver restores the last programmed timing on reconnect, which
@@ -669,7 +731,7 @@ Each item below is backed by the USB capture of the vendor driver and/or static 
 * The second logical output is still allocated (about 31 MB) and polled every 5 s on single-output adapters. The
   USB ID does not say whether the board has one or two outputs, so this needs a probe-time capability check first.
 
-#### Hardware test checklist (0.9.0-r9 to 1.0.5 changes)
+#### Hardware test checklist (0.9.0-r9 to 1.1.0-beta1 changes)
 
 Result so far: fully working on Wayland; on Xorg, unplugging the USB adapter crashes the X server (see
 [Limitations](#limitations)). Confirmed on the adapter: steps 1, 2, 3 (the monitor went to standby and stayed
@@ -700,7 +762,8 @@ settings (on KDE Plasma: `kscreen-doctor`) instead.
     lines in `dmesg`, especially around monitor unplug/replug: they are unknown event types.
 12. Leave a static desktop for a few minutes with the default `keepalive_ms=0`: does the picture blank (items 18, 35)?
 13. `xrandr` lists the adapter's modes (for example 1920x1080@50, 1680x1050); switch to a few and back (items 21-23).
-14. No audio device is expected; check that the monitor does not report an audio stream or show audio artefacts (item 20).
+14. With a monitor that has speakers or an audio output: play a test tone to the "Trigger6 USB to HDMI Adapter" sink;
+    it must sound clean, without dropouts, also while windows move (items 20, 37).
 
 ### 0.9.0-r9 (2026-11-04): review fixes on top of `0.9.0-r8`
 
@@ -822,6 +885,9 @@ original companion tools goes to the original author. The copyright notice
 * The driver architecture follows the Linux UDL (USB DisplayLink) pattern.
 * The upstream README lists as contributors: Authentra, Claude Opus 4.6 (Anthropic), Codex 5.4 (OpenAI) and Gemini (Google).
 
+* HDMI audio (1.1.0-beta1) is a port of the implementation in [mct-linux](https://github.com/XXCoreRangerX/mct-linux)
+  (GPL-2.0-only), which decoded and verified the T6 audio protocol.
+
 ### What this fork changes
 
 * Kernel 7.2 and Debian 13 / 6.12 DRM API compatibility (`drm_atomic_commit`, `drm_dev_set_dma_dev`) and Xorg dirty-framebuffer support.
@@ -830,6 +896,7 @@ original companion tools goes to the original author. The copyright notice
 * The user-space SIMD bridge (`trigger6_bridge.h`, `trigger6-fast`), the asynchronous two-URB USB path and the removal of per-frame copies.
 * `0.9.0-r9`: review fixes for fault recovery, probe error handling, output switch-off, suspend/resume, mode handling and the helper, plus corrected 1080p timing and colour data.
 * `1.0.0`: init and mode-set sequence, interrupt endpoint, the adapter's own mode table and sync encoding (see [Changelog](#changelog)).
+* `1.1.0-beta1`: HDMI audio as an ALSA sound card (beta: tested virtually, physically untested), ported from mct-linux and adapted for PipeWire.
 * `1.0.5`: a different monitor starts on its own preferred timing instead of the previous monitor's.
 * `1.0.4`: only the outputs the adapter reports (request `0xB3`), so single-output adapters no longer carry a second output; event flag `0x10` resends the picture; keepalive off by default; `make load` / `make unload`.
 * `1.0.3`: the monitor's own EDID timings, built as the vendor driver builds its custom modes, so 1920x1200 monitors get their native mode.

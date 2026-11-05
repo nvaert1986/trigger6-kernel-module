@@ -391,6 +391,9 @@ struct t6_device {
 	/* Heads programmed by the last successful chip init (io_lock). */
 	u8 init_mask;
 
+	/* HDMI audio (trigger6_audio.c); NULL without a sound card. */
+	struct t6_audio *audio;
+
 	/* Serialize frame staging and USB submission across both heads. */
 	struct delayed_work reprobe_work;
 	struct mutex tx_lock;
@@ -486,5 +489,33 @@ bool t6_head_find_timing(struct t6_head *head,
 
 /* connector */
 int t6_connector_init(struct t6_device *t6, struct t6_head *head);
+
+/* USB helpers in trigger6_drv.c, also used by trigger6_audio.c */
+int t6_ctrl_out(struct t6_device *t6, u8 req, u16 val, u16 idx,
+		const void *data, u16 size);
+int t6_ctrl_in(struct t6_device *t6, u8 req, u16 val, u16 idx,
+	       void *data, u16 size);
+int t6_bulk_write(struct t6_device *t6, const void *src, size_t len);
+
+/* HDMI audio (trigger6_audio.c), only built with ALSA PCM support */
+struct t6_audio;
+#if IS_ENABLED(CONFIG_SND_PCM)
+void t6_audio_init(struct t6_device *t6, struct usb_interface *intf);
+void t6_audio_fini(struct t6_device *t6);
+void t6_audio_suspend(struct t6_device *t6);
+void t6_audio_resume(struct t6_device *t6);
+void t6_audio_engine_lost(struct t6_device *t6);
+void t6_audio_metrics(struct t6_device *t6, char *buf, size_t size);
+#else
+static inline void t6_audio_init(struct t6_device *t6, struct usb_interface *intf) {}
+static inline void t6_audio_fini(struct t6_device *t6) {}
+static inline void t6_audio_suspend(struct t6_device *t6) {}
+static inline void t6_audio_resume(struct t6_device *t6) {}
+static inline void t6_audio_engine_lost(struct t6_device *t6) {}
+static inline void t6_audio_metrics(struct t6_device *t6, char *buf, size_t size)
+{
+	strscpy(buf, "audio=none", size);
+}
+#endif
 
 #endif

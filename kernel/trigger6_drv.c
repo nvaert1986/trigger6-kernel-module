@@ -667,8 +667,6 @@ bool t6_head_find_timing(struct t6_head *head,
  * its 1360x768 request in the USB capture shows the same). The sync end
  * is unchanged. Blobs here use the table's own convention.
  */
-static int t6_ctrl_out(struct t6_device *t6, u8 req, u16 val,
-		       u16 idx, const void *data, u16 size);
 
 static int t6_set_resolution(struct t6_device *t6, struct t6_head *head,
 			     const u8 *blob)
@@ -713,10 +711,6 @@ static const unsigned int t6_reprobe_delays_ms[] = {
 	5000,
 };
 
-static int t6_ctrl_out(struct t6_device *t6, u8 req, u16 val,
-		       u16 idx, const void *data, u16 size);
-static int t6_ctrl_in(struct t6_device *t6, u8 req, u16 val,
-		      u16 idx, void *data, u16 size);
 static bool t6_edid_base_block_valid(const u8 *edid);
 
 static void t6_schedule_reprobe(struct t6_device *t6);
@@ -921,6 +915,12 @@ static ssize_t t6_metrics_show(struct device *dev,
 				head->metrics.last_error_source : "none");
 	}
 
+	{
+		char line[160];
+
+		t6_audio_metrics(t6, line, sizeof(line));
+		len += sysfs_emit_at(buf, len, "%s\n", line);
+	}
 	return len;
 }
 
@@ -1630,8 +1630,8 @@ static void t6_stage_pending_head_locked(struct t6_head *head,
  * ------------------------------------------------------------------
  */
 
-static int t6_ctrl_out(struct t6_device *t6, u8 req, u16 val,
-		       u16 idx, const void *data, u16 size)
+int t6_ctrl_out(struct t6_device *t6, u8 req, u16 val,
+		u16 idx, const void *data, u16 size)
 {
 	void *buf = NULL;
 	int ret;
@@ -1659,8 +1659,8 @@ static int t6_ctrl_out(struct t6_device *t6, u8 req, u16 val,
 	return ret;
 }
 
-static int t6_ctrl_in(struct t6_device *t6, u8 req, u16 val,
-		      u16 idx, void *data, u16 size)
+int t6_ctrl_in(struct t6_device *t6, u8 req, u16 val,
+	       u16 idx, void *data, u16 size)
 {
 	void *buf;
 	int ret;
@@ -1879,7 +1879,7 @@ static int t6_last_frame_store(struct t6_head *head, const void *data,
 	return 0;
 }
 
-static int t6_bulk_write(struct t6_device *t6, const void *src, size_t len)
+int t6_bulk_write(struct t6_device *t6, const void *src, size_t len)
 {
 	int ret;
 
@@ -2184,6 +2184,7 @@ static int t6_chip_init(struct t6_device *t6, bool read_tables)
 			  t6_audio_off, sizeof(t6_audio_off));
 	if (ret < 0)
 		return ret;
+	t6_audio_engine_lost(t6);
 
 	for (idx = 0; idx < t6->output_count; idx++) {
 		if (!init_head[idx])
@@ -4575,6 +4576,7 @@ static int t6_usb_probe(struct usb_interface *intf,
 	ret = devm_device_add_group(&intf->dev, &t6_group);
 	if (ret)
 		dev_warn(&intf->dev, "Failed to create sysfs group: %d\n", ret);
+	t6_audio_init(t6, intf);
 
 	dev_info(&intf->dev, "T6 display ready with %u output%s\n",
 		 t6->output_count, t6->output_count == 1 ? "" : "s");
@@ -4635,7 +4637,9 @@ static void t6_usb_disconnect(struct usb_interface *intf)
 	 * 3. Shutdown -- disables outputs (pipe_update guarded by drm_dev_enter)
 	 * 4. Tear down userspace-visible state and buffers
 	 * No poll_fini needed -- polling is disabled.
+	 * The sound card goes first: its work takes io_lock and sends USB.
 	 */
+	t6_audio_fini(t6);
 	drm_dev_unplug(&t6->drm);
 	/* Wake any userspace readers blocked on framebuffer export */
 	t6_wake_all_export_waiters(t6);
@@ -4684,6 +4688,7 @@ static int t6_usb_suspend(struct usb_interface *intf, pm_message_t message)
 	if (ret)
 		return ret;
 
+	t6_audio_suspend(t6);
 	t6_int_stop(t6);
 	cancel_delayed_work_sync(&t6->reprobe_work);
 	cancel_work_sync(&t6->resend_work);
@@ -4727,6 +4732,7 @@ static int t6_usb_resume(struct usb_interface *intf)
 		return 0;
 	}
 	t6_int_start(t6);
+	t6_audio_resume(t6);
 
 	/*
 	 * Only heads the compositor never enabled still hold the primed
@@ -4793,4 +4799,4 @@ MODULE_AUTHOR("Authentra / Ralph Friedman");
 MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_LICENSE("GPL");
 
-MODULE_VERSION("1.0.5");
+MODULE_VERSION("1.1.0-beta1");

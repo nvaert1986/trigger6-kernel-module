@@ -1,4 +1,4 @@
-# trigger6 1.0.5 - target: Debian 13 (trixie), kernel 6.12.x LTS
+# trigger6 1.1.0-beta1 - target: Debian 13 (trixie), kernel 6.12.x LTS
 
 ## Package `trigger6-dkms` (kernel module)
 | Dependency | Type | Notes |
@@ -7,6 +7,7 @@
 | make, gcc (>= 14) | Depends | Must match the compiler the kernel was built with (Debian 13: gcc-14) |
 | linux-headers-amd64 | Depends/Recommends | Headers for 6.12.x (for example 6.12.107+deb13) |
 | kmod | Depends | modprobe/depmod |
+| ALSA in the kernel (`CONFIG_SND_PCM`) | Kernel | Default in Debian; needed for HDMI audio since 1.1.0-beta1, the display works without it |
 | pahole | Recommends | Only for BTF generation by kbuild |
 | udev (systemd) | Recommends | `71-trigger6.rules` |
 
@@ -65,3 +66,8 @@ Without the helper the driver falls back to in-kernel conversion (~29 fps).
 - No new dependencies. The changes use no kernel interfaces beyond those of 1.0.0.
 - Compiled against 6.18.59 (Gentoo, `W=1`, no errors or warnings).
 - Tested on the adapter under KDE Plasma (Wayland), Gentoo with kernel 6.18.59: HP E233, iiyama PL2595W and Dell P2319H swapped on the running system; each monitor started on its own preferred timing, without a mode change by the desktop afterwards.
+
+## 1.1.0-beta1 - additional checks
+- HDMI audio as an ALSA sound card ("Trigger6 USB to HDMI Adapter"). No new packages; the kernel needs ALSA PCM (`CONFIG_SND_PCM`, standard in Debian). PipeWire (Debian 13 default) offers it as an extra sink.
+- Compiled against 6.18.59 (Gentoo, `W=1`, no errors or warnings). Not yet compiled against Debian 13 (kernel 6.12), where the audio code uses `hrtimer_init()` instead of `hrtimer_setup()`.
+- Tested virtually up to the USB transfers (sound card, `aplay`, PipeWire, usbmon capture); physically untested, as no monitor with speakers or an audio output was available.
