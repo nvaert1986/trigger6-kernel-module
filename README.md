@@ -6,12 +6,12 @@ This release reaches about **60 new frames per second at 1920x1080** on the test
 setup, with a stable USB connection.
 
 > **New in 1.1.0 (beta): HDMI audio support.** The adapter now also appears as a sound card ("Trigger6 USB to HDMI
-> Adapter"). This is a **beta**: the audio was tested virtually (the sound card, PipeWire, the playback stream and
-> the USB transfers to the adapter were all checked) but is **physically untested**: nobody has heard it yet, as
-> none of the test monitors has speakers or an audio output. See the [1.1.0-beta1 entry](#110-beta1-2026-11-05).
-> **1.1.0-beta3** adds a hardware cursor (moving the mouse no longer sends whole frames), a gamma table, the
-> monitor's full EDID (extension blocks) and the monitor's audio capabilities (ELD) for the sound card; see the
-> [1.1.0-beta3 entry](#110-beta3-2026-11-05). Feedback from a monitor or TV with speakers is welcome.
+> Adapter"). **Heard on real hardware with 1.1.0-beta3:** played through the built-in speakers of an iiyama
+> PL2595W, without dropouts, and back by itself after an HDMI replug during playback. See the
+> [1.1.0-beta1 entry](#110-beta1-2026-11-05) and the [audio test](#tested-configuration). **1.1.0-beta3** adds a
+> hardware cursor (moving the mouse no longer sends whole frames), a gamma table, the monitor's full EDID (extension
+> blocks) and the monitor's audio capabilities (ELD) for the sound card; see the
+> [1.1.0-beta3 entry](#110-beta3-2026-11-05). It is still a beta until it has run on a Debian machine.
 
 > **Status: experimental.** Tested on one adapter model (see
 > [Tested configuration](#tested-configuration)). Version 1.1.0-beta3 works on Wayland and builds on Arch Linux (kernel 7.2) and
@@ -54,6 +54,7 @@ setup, with a stable USB connection.
 | 1.0.0 and 1.0.1 monitor test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), Dell P2725HE: picture, helper, mode switches, HDMI hotplug, flip-done events and `keepalive_ms=0`, checked against `t6_metrics` and a USB capture |
 | 1.0.3 monitor test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), seven monitors from three brands: each detected on plug-in, set to its native mode, clean picture, no errors |
 | 1.1.0-beta1 audio test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), PipeWire: sound card registered, playback through `aplay` and PipeWire, USB transfers checked with usbmon. **Not heard**: no monitor with speakers or audio output available |
+| 1.1.0-beta3 audio test (by ear) | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), PipeWire, iiyama PL2595W (2 x 2 W speakers, OSD Audio Source = HDMI): audio heard, 4532 packets with 0 underruns (`audio_fills=0`), no USB errors; ELD "PL2595W" with LPCM 2 ch 32/44.1/48 kHz 16/20/24 bit, jack plugged; after an HDMI replug during playback the audio came back by itself (engine restarted, still 0 underruns) |
 | 1.1.0-beta3 test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), Dell P2725HE: EDID extension block read, ELD and jack controls, hardware cursor used by KWin, gamma table checked with a warm test table; feature level 8 |
 | 1.1.0-beta3 builds | Linux 6.18.59 and Debian 13 `linux-headers-6.12.113+deb13-amd64` (cross-build, `W=1`, no warnings) |
 | 1.1.0-beta2 builds | Linux 6.18.59 and Debian 13 `linux-headers-6.12.107+deb13-amd64` (cross-build, `W=1`, no warnings); on 6.12 the audio code uses `hrtimer_init()`, on 6.18 `hrtimer_setup()` |
@@ -409,10 +410,11 @@ Set one at load time with `modprobe trigger6 name=value`.
   the monitor lists, or outside its refresh and pixel clock limits, are left out (item 28): on a 1080p monitor with a
   48-100 Hz range that removes 1920x1200, 1600x1200 and 1920x1080@30. The monitor's own detailed timings are offered
   as well, up to 1920x1200, 60 Hz and the fastest clock in the adapter's table (item 31).
-* HDMI audio (1.1.0 beta): playback only (48 kHz, 16-bit, stereo), as the adapter reports. Tested
-  virtually up to the USB transfers on the adapter, **physically untested** (not heard): none of the test monitors
-  has speakers or an audio output. The monitor's audio capabilities (ELD) and a jack control are offered on the
-  sound card (1.1.0-beta3); PipeWire currently uses a generic stereo profile for this card and does not read them.
+* HDMI audio (1.1.0 beta): playback only (48 kHz, 16-bit, stereo), as the adapter reports. Heard on one monitor
+  with built-in speakers (iiyama PL2595W, see [Tested configuration](#tested-configuration)); not tried on a TV or
+  an AV receiver, or with other sample rates (the adapter offers only 48 kHz; PipeWire resamples). The monitor's
+  audio capabilities (ELD) and a jack control are offered on the sound card (1.1.0-beta3); PipeWire currently uses a
+  generic stereo profile for this card and does not read them.
 * Gamma table (1.1.0-beta3): offered on feature level 8 adapters; KDE's Night Light does not use it on this output
   (it applies its colour change in shaders), so the table is used only by programs that set `GAMMA_LUT` or the
   legacy gamma ioctl.
@@ -433,8 +435,9 @@ Set one at load time with `modprobe trigger6 name=value`.
 
 ### 1.1.0-beta3 (2026-11-05)
 
-Still a **beta: HDMI audio is tested virtually, physically untested** (see 1.1.0-beta1 below). New display features:
-a hardware cursor, a gamma table and the monitor's full EDID. Upgrading an existing DKMS install: run
+Still a **beta** (not yet run on a Debian machine). **HDMI audio was heard with this release** after it was
+published: see the audio test in [Tested configuration](#tested-configuration). New display features: a hardware
+cursor, a gamma table and the monitor's full EDID. Upgrading an existing DKMS install: run
 `dkms remove trigger6/1.1.0-beta2 --all` (or the installed version), then install `1.1.0-beta3` as in
 [section B](#b-permanent-install-with-dkms-debian-13--ubuntu--arch). Includes `1.0.6` (item 39). The helper and its
 service are unchanged.
@@ -442,8 +445,9 @@ service are unchanged.
 **Testing status, stated plainly:** builds without warnings (`W=1`) against Linux 6.18.59 and, as a cross-build,
 against Debian 13's `linux-headers-6.12.113+deb13-amd64`. Tested on the adapter with a Dell P2725HE under KDE Plasma
 (Wayland) on Gentoo, Linux 6.18.59, per item below. The cursor, gamma and EDID requests were compared with the
-vendor's Windows driver (`T6InDisp.dll`, `TrgIdd.dll`, `t6sta.sys`). Not tested: a monitor with audio (ELD with
-audio formats), a dual-output adapter (second cursor and gamma table), suspend/resume.
+vendor's Windows driver (`T6InDisp.dll`, `TrgIdd.dll`, `t6sta.sys`). Afterwards also tested with an iiyama PL2595W:
+audio heard, ELD with its audio formats, cursor looks correct. Not tested: a dual-output adapter (second cursor and
+gamma table), suspend/resume.
 
 
 40. **EDID extension blocks are read** (`t6_read_edid_ext`, `t6_probe_head`, `t6_connector_get_modes`). Only the
