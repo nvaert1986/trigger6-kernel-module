@@ -88,6 +88,7 @@
 #define T6_RES_ENTRY_SIZE	32
 #define T6_RES_CHUNK_SIZE	512
 #define T6_RES_MAX_ENTRIES	64	/* the tested table has 30 */
+#define T6_EDID_TIMINGS		4	/* detailed timings in an EDID base block */
 
 /*
  * 0x1C/0x1D: gamma LUT. 0x1C wValue=(output << 8) | op: op 0 at init,
@@ -270,7 +271,18 @@ struct t6_head {
 	u32 frame_seq;
 	u8 edid_data[256];
 	int edid_len;
-	spinlock_t edid_lock;	/* edid_data/edid_len vs. get_modes */
+	spinlock_t edid_lock;	/* edid_data/edid_len/edid_timings vs. get_modes */
+	/*
+	 * Timing blocks built from the monitor's EDID detailed timings, in
+	 * EDID order; edid_timing_pref is set when entry 0 is the monitor's
+	 * first (preferred) detailed timing.
+	 */
+	u8 edid_timings[T6_EDID_TIMINGS][T6_RES_ENTRY_SIZE];
+	unsigned int edid_timing_count;
+	bool edid_timing_pref;
+	/* Timing last sent with SET_RESOLUTION (io_lock); chip init restores it. */
+	u8 cur_timing[T6_RES_ENTRY_SIZE];
+	bool cur_timing_valid;
 	enum t6_head_transport transport;
 
 	struct drm_crtc crtc;
@@ -446,6 +458,10 @@ const u8 *t6_find_mode_blob(int width, int height, int refresh);
 const u8 *t6_head_mode_blob(const struct t6_head *head, int width, int height,
 			    int refresh);
 void t6_blob_to_mode(const u8 *blob, struct drm_display_mode *mode);
+bool t6_timing_matches_mode(const u8 *blob, const struct drm_display_mode *mode);
+u32 t6_head_max_clock(const struct t6_head *head);
+bool t6_head_find_timing(struct t6_head *head,
+			 const struct drm_display_mode *mode, u8 *out);
 
 /* connector */
 int t6_connector_init(struct t6_device *t6, struct t6_head *head);

@@ -468,6 +468,197 @@ void t6_blob_to_mode(const u8 *blob, struct drm_display_mode *mode)
 	drm_mode_set_name(mode);
 }
 
+static u32 t6_blob_clock(const u8 *blob)
+{
+	return blob[0] | (blob[1] << 8) | (blob[2] << 16) | ((u32)blob[3] << 24);
+}
+
+/* True if @blob programs exactly @mode (as t6_blob_to_mode() builds it). */
+bool t6_timing_matches_mode(const u8 *blob, const struct drm_display_mode *mode)
+{
+	u16 hs = t6_blob_u16(blob, 10), vs = t6_blob_u16(blob, 18);
+
+	return mode->clock == t6_blob_clock(blob) &&
+	       mode->hdisplay == t6_blob_u16(blob, 8) &&
+	       mode->hsync_start == hs &&
+	       mode->hsync_end == hs + t6_blob_u16(blob, 12) &&
+	       mode->htotal == t6_blob_u16(blob, 6) &&
+	       mode->vdisplay == t6_blob_u16(blob, 16) &&
+	       mode->vsync_start == vs &&
+	       mode->vsync_end == vs + t6_blob_u16(blob, 20) &&
+	       mode->vtotal == t6_blob_u16(blob, 14);
+}
+
+/*
+ * Highest pixel clock used for timings built from a monitor's EDID: the
+ * fastest mode this output's device table lists (197 MHz on the tested
+ * adapter), or the fastest built-in mode without a table.
+ */
+u32 t6_head_max_clock(const struct t6_head *head)
+{
+	u32 max = 148500;
+	unsigned int i;
+
+	for (i = 0; head->mode_table && i < head->mode_count; i++)
+		max = max_t(u32, max, t6_blob_clock(head->mode_table +
+						      i * T6_RES_ENTRY_SIZE));
+	return max;
+}
+
+/*
+ * Build a timing block (table convention) the way the vendor driver builds
+ * its custom modes (T6InDisp.dll 0x1800f5d90, PLL helper 0x1800f7530): a
+ * 40 MHz reference, a VCO of 800 to 1600 MHz and a post divider of 4, 8, 16
+ * or 32 (output select 3, 1, 2, 0), so the clock is 10000, 5000, 2500 or
+ * 1250 kHz * (IDIV + FNUM / 1000) with the smallest divider that reaches
+ * 800 MHz. "Reduced" is always 0; byte 31 is 2 for widths 1360 and 1680 and
+ * for widths above 1920 that are not a multiple of 32. The vendor computes
+ * FNUM in floating point and truncates, so for some clocks its FNUM is one
+ * lower (at most 5 kHz); this is the exact value. Applied to the device
+ * table's own timings this reproduces 29 of its 30 entries, apart from that
+ * FNUM rounding; the 30th sets "reduced" on 1600x900.
+ */
+static bool t6_build_timing(u8 *b, u32 khz, u16 w, u16 h, u16 htotal,
+			    u16 hsync_start, u16 hsync_w, u16 vtotal,
+			    u16 vsync_start, u16 vsync_w, bool hpos, bool vpos)
+{
+	static const u8 outsel[] = { 3, 1, 2, 0 };
+	u32 base = 0;
+	unsigned int i;
+
+	if (khz < 25000 || khz > 300000 || !htotal || !vtotal)
+		return false;
+	for (i = 0; i < ARRAY_SIZE(outsel); i++) {
+		if ((khz << (i + 2)) >= 800000) {
+			base = 40000 >> (i + 2);
+			break;
+		}
+	}
+	if (!base)
+		return false;
+
+	memset(b, 0, T6_RES_ENTRY_SIZE);
+	b[0] = khz & 0xff;
+	b[1] = (khz >> 8) & 0xff;
+	b[2] = (khz >> 16) & 0xff;
+	b[3] = khz >> 24;
+	t6_blob_put_u16(b, 4, DIV_ROUND_CLOSEST_ULL((u64)khz * 1000,
+						    (u32)htotal * vtotal));
+	t6_blob_put_u16(b, 6, htotal);
+	t6_blob_put_u16(b, 8, w);
+	t6_blob_put_u16(b, 10, hsync_start);
+	t6_blob_put_u16(b, 12, hsync_w);
+	t6_blob_put_u16(b, 14, vtotal);
+	t6_blob_put_u16(b, 16, h);
+	t6_blob_put_u16(b, 18, vsync_start);
+	t6_blob_put_u16(b, 20, vsync_w);
+	t6_blob_put_u16(b, 22, (khz % base) * 1000 / base);
+	t6_blob_put_u16(b, 24, 1000);
+	b[26] = khz / base;
+	b[27] = outsel[i];
+	b[28] = hpos;
+	b[29] = vpos;
+	b[31] = (w == 1360 || w == 1680 || (w > 1920 && (w & 0x1f))) ? 2 : 0;
+	return true;
+}
+
+/*
+ * Timing blocks for the detailed timings of an EDID base block (the only
+ * block read from the device). Only what this adapter can show: up to
+ * T6_MAX_WIDTH x T6_MAX_HEIGHT, at most 60 Hz, progressive, digital separate
+ * sync. The pixel clock is checked against t6_head_max_clock() when a
+ * timing is used, because the device table is read after the EDID.
+ */
+static void t6_build_edid_timings(struct t6_head *head, const u8 *edid)
+{
+	u8 t[T6_EDID_TIMINGS][T6_RES_ENTRY_SIZE];
+	unsigned int i, n = 0;
+	bool pref = false;
+
+	for (i = 0; i < 4 && n < T6_EDID_TIMINGS; i++) {
+		const u8 *d = edid + 0x36 + 18 * i;
+		u32 khz = (d[0] | (d[1] << 8)) * 10;
+		u16 ha = d[2] | ((d[4] & 0xf0) << 4);
+		u16 hb = d[3] | ((d[4] & 0x0f) << 8);
+		u16 va = d[5] | ((d[7] & 0xf0) << 4);
+		u16 vb = d[6] | ((d[7] & 0x0f) << 8);
+		u16 hfp = d[8] | ((d[11] & 0xc0) << 2);
+		u16 hsw = d[9] | ((d[11] & 0x30) << 4);
+		u16 vfp = (d[10] >> 4) | ((d[11] & 0x0c) << 2);
+		u16 vsw = (d[10] & 0x0f) | ((d[11] & 0x03) << 4);
+
+		if (!khz || (d[17] & 0x80) || (d[17] & 0x18) != 0x18)
+			continue;
+		if (!ha || !va || ha > T6_MAX_WIDTH || va > T6_MAX_HEIGHT ||
+		    !hsw || !vsw || hfp + hsw > hb || vfp + vsw > vb)
+			continue;
+		if (!t6_build_timing(t[n], khz, ha, va, ha + hb, ha + hfp, hsw,
+				     va + vb, va + vfp, vsw, d[17] & 0x02,
+				     d[17] & 0x04) ||
+		    t6_blob_u16(t[n], 4) > 60)
+			continue;
+		if (i == 0)
+			pref = true;
+		n++;
+	}
+
+	spin_lock(&head->edid_lock);
+	memcpy(head->edid_timings, t, n * T6_RES_ENTRY_SIZE);
+	head->edid_timing_count = n;
+	head->edid_timing_pref = pref;
+	spin_unlock(&head->edid_lock);
+}
+
+/*
+ * Timing block for exactly @mode: built-in, device table, then the
+ * monitor's EDID timings. Size and refresh alone are not enough: the
+ * device table's 1920x1200@60 runs at 193.25 MHz, a monitor's reduced
+ * blanking 1920x1200@60 at 154 MHz. Modes that are not from this driver's
+ * own list fall back to the size and refresh lookup.
+ */
+bool t6_head_find_timing(struct t6_head *head,
+			 const struct drm_display_mode *mode, u8 *out)
+{
+	const u8 *blob = NULL;
+	bool found = false;
+	unsigned int i;
+
+	for (i = 0; i < t6_builtin_mode_count && !blob; i++)
+		if (t6_timing_matches_mode(t6_builtin_modes[i].blob, mode))
+			blob = t6_builtin_modes[i].blob;
+	for (i = 0; head->mode_table && i < head->mode_count && !blob; i++) {
+		const u8 *e = head->mode_table + i * T6_RES_ENTRY_SIZE;
+
+		if (t6_timing_matches_mode(e, mode))
+			blob = e;
+	}
+	if (blob) {
+		memcpy(out, blob, T6_RES_ENTRY_SIZE);
+		return true;
+	}
+
+	spin_lock(&head->edid_lock);
+	for (i = 0; i < head->edid_timing_count && !found; i++) {
+		const u8 *e = head->edid_timings[i];
+
+		if (t6_timing_matches_mode(e, mode) &&
+		    t6_blob_clock(e) <= t6_head_max_clock(head)) {
+			memcpy(out, e, T6_RES_ENTRY_SIZE);
+			found = true;
+		}
+	}
+	spin_unlock(&head->edid_lock);
+	if (found)
+		return true;
+
+	blob = t6_head_mode_blob(head, mode->hdisplay, mode->vdisplay,
+				 drm_mode_vrefresh(mode));
+	if (!blob)
+		return false;
+	memcpy(out, blob, T6_RES_ENTRY_SIZE);
+	return true;
+}
+
 /*
  * SET_RESOLUTION takes the table entry with a 1-based sync start: the
  * vendor driver adds 1 to hsync/vsync start and subtracts 1 from their
@@ -483,13 +674,21 @@ static int t6_set_resolution(struct t6_device *t6, struct t6_head *head,
 {
 	u8 b[T6_RES_ENTRY_SIZE];
 
+	int ret;
+
 	memcpy(b, blob, sizeof(b));
 	t6_blob_put_u16(b, 10, t6_blob_u16(b, 10) + 1);
 	t6_blob_put_u16(b, 12, t6_blob_u16(b, 12) - 1);
 	t6_blob_put_u16(b, 18, t6_blob_u16(b, 18) + 1);
 	t6_blob_put_u16(b, 20, t6_blob_u16(b, 20) - 1);
-	return t6_ctrl_out(t6, T6_REQ_SET_RESOLUTION, head->output_idx, 0,
-			   b, sizeof(b));
+	ret = t6_ctrl_out(t6, T6_REQ_SET_RESOLUTION, head->output_idx, 0,
+			  b, sizeof(b));
+	if (ret >= 0) {
+		if (blob != head->cur_timing)
+			memcpy(head->cur_timing, blob, T6_RES_ENTRY_SIZE);
+		head->cur_timing_valid = true;
+	}
+	return ret;
 }
 
 static const u32 t6_formats[] = { DRM_FORMAT_XRGB8888 };
@@ -1042,6 +1241,8 @@ static int t6_probe_head(struct t6_device *t6, struct t6_head *head)
 		head->edid_len = EDID_LENGTH;
 	} else {
 		head->edid_len = 0;
+		head->edid_timing_count = 0;
+		head->edid_timing_pref = false;
 	}
 	spin_unlock(&head->edid_lock);
 
@@ -1050,23 +1251,13 @@ static int t6_probe_head(struct t6_device *t6, struct t6_head *head)
 			((head->edid_data[0x3A] & 0xF0) << 4);
 		preferred_height = head->edid_data[0x3B] |
 			 ((head->edid_data[0x3D] & 0xF0) << 4);
-		if (preferred_width == 0 || preferred_height == 0) {
-			preferred_width = T6_SCANOUT_WIDTH;
-			preferred_height = T6_SCANOUT_HEIGHT;
-		}
-		preferred_width = clamp(preferred_width, 640, 1920);
-		preferred_height = clamp(preferred_height, 480, 1200);
 		t6_parse_edid_monitor_name(head);
-		if (preferred_width != T6_SCANOUT_WIDTH ||
-		    preferred_height != T6_SCANOUT_HEIGHT)
-			dev_info(&t6->udev->dev,
-				 "Head %u monitor reports preferred mode %dx%d, but the current reverse-engineered modeset path is fixed to %dx%d@%d\n",
-				 head->output_idx,
-				 preferred_width,
-				 preferred_height,
-				 T6_SCANOUT_WIDTH,
-				 T6_SCANOUT_HEIGHT,
-				 T6_SCANOUT_REFRESH_HZ);
+		t6_build_edid_timings(head, edid);
+		dev_info(&t6->udev->dev,
+			 "Head %u: monitor prefers %dx%d; %u EDID timing(s) usable on this adapter%s\n",
+			 head->output_idx, preferred_width, preferred_height,
+			 head->edid_timing_count,
+			 head->edid_timing_pref ? ", including the preferred one" : "");
 	} else if (ret >= 128) {
 		dev_warn(&t6->udev->dev,
 			 "Head %u returned an EDID block with invalid checksum; using fixed %dx%d mode assumptions\n",
@@ -1819,8 +2010,13 @@ static int t6_chip_init(struct t6_device *t6, bool read_tables)
 		 * compositor chose, not 1080p: head->width/height still describe
 		 * the active DRM mode and atomic_enable only reprograms on change.
 		 */
-		blob = t6_head_mode_blob(head, head->width, head->height,
-					 head->refresh);
+		if (head->cur_timing_valid &&
+		    t6_blob_u16(head->cur_timing, 8) == head->width &&
+		    t6_blob_u16(head->cur_timing, 16) == head->height)
+			blob = head->cur_timing;
+		else
+			blob = t6_head_mode_blob(head, head->width,
+						 head->height, head->refresh);
 		if (!blob) {
 			blob = t6_mode_1080p;
 			mutex_lock(&t6->tx_lock);
@@ -3324,21 +3520,21 @@ static void t6_crtc_atomic_enable(struct drm_crtc *crtc,
 		int new_w = mode->hdisplay;
 		int new_h = mode->vdisplay;
 		int new_r = drm_mode_vrefresh(mode);
-		const u8 *blob = t6_head_mode_blob(head, new_w, new_h, new_r);
+		u8 blob[T6_RES_ENTRY_SIZE];
+		bool found = t6_head_find_timing(head, mode, blob);
 
 		/*
-		 * Compare timing blobs, not only sizes: 1080p60 -> 1080p30
-		 * keeps the size but needs a different timing.
+		 * Compare whole timings, not only sizes: 1080p60 -> 1080p30
+		 * keeps the size, and two 1920x1200@60 timings can differ.
 		 */
-		if (new_w && new_h && !blob) {
+		if (new_w && new_h && !found) {
 			dev_warn(&t6->udev->dev,
 				 "Output %u: no timing for %dx%d@%d, keeping %dx%d\n",
 				 head->output_idx, new_w, new_h, new_r,
 				 head->width, head->height);
 		} else if (new_w && new_h &&
-			   blob != t6_head_mode_blob(head, head->width,
-						     head->height,
-						     head->refresh)) {
+			   (!head->cur_timing_valid ||
+			    memcmp(blob, head->cur_timing, sizeof(blob)))) {
 			int ret = t6_set_resolution(t6, head, blob);
 
 			if (ret >= 0) {
@@ -4389,4 +4585,4 @@ MODULE_AUTHOR("Authentra / Ralph Friedman");
 MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_LICENSE("GPL");
 
-MODULE_VERSION("1.0.2");
+MODULE_VERSION("1.0.3");

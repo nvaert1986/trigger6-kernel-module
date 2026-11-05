@@ -1,4 +1,4 @@
-# trigger6 1.0.2 - target: Debian 13 (trixie), kernel 6.12.x LTS
+# trigger6 1.0.3 - target: Debian 13 (trixie), kernel 6.12.x LTS
 
 ## Package `trigger6-dkms` (kernel module)
 | Dependency | Type | Notes |
@@ -50,3 +50,8 @@ Without the helper the driver falls back to in-kernel conversion (~29 fps).
 ## 1.0.2 - additional checks
 - No new dependencies. Kernel module unchanged apart from its version number.
 - udev rule and systemd user service tested on Gentoo with systemd and KDE Plasma (Wayland): the helper starts when the adapter is plugged in and ends cleanly (exit code 3, service inactive, no restarts) when it is unplugged. Not yet tested on Debian.
+
+## 1.0.3 - additional checks
+- No new dependencies. The changes use no kernel interfaces beyond those of 1.0.0.
+- Compiled against 6.18.59 (Gentoo, `W=1`, no errors or warnings).
+- Tested on the adapter with seven monitors under KDE Plasma (Wayland), Gentoo with kernel 6.18.59: iiyama PL2595W at its native 1920x1200, and Dell P2725HE, P2317H, P2726HE, P2319H, P2422H and HP E233 at 1920x1080. See the changelog in `README.md`.

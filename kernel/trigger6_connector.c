@@ -35,7 +35,7 @@ t6_connector_detect(struct drm_connector *connector, bool force)
  * No USB calls. No EDID parsing. Just a CVT mode.
  */
 static enum drm_mode_status
-t6_connector_mode_valid_common(const struct t6_head *head,
+t6_connector_mode_valid_common(struct t6_head *head,
 			       const struct drm_display_mode *mode);
 
 /*
@@ -138,6 +138,27 @@ static bool t6_edid_limits_allow(const struct t6_edid_limits *lim,
 	return false;
 }
 
+static u32 t6_blob_clock_khz(const u8 *blob)
+{
+	return blob[0] | (blob[1] << 8) | (blob[2] << 16) | ((u32)blob[3] << 24);
+}
+
+/* True if a built-in or device table timing programs exactly @mode. */
+static bool t6_static_timing_exists(const struct t6_head *head,
+				    const struct drm_display_mode *mode)
+{
+	unsigned int i;
+
+	for (i = 0; i < t6_builtin_mode_count; i++)
+		if (t6_timing_matches_mode(t6_builtin_modes[i].blob, mode))
+			return true;
+	for (i = 0; head->mode_table && i < head->mode_count; i++)
+		if (t6_timing_matches_mode(head->mode_table +
+					   i * T6_RES_ENTRY_SIZE, mode))
+			return true;
+	return false;
+}
+
 static int t6_connector_get_modes(struct drm_connector *connector)
 {
 	struct t6_head *head = t6_head_from_connector(connector);
@@ -145,6 +166,10 @@ static int t6_connector_get_modes(struct drm_connector *connector)
 	const struct drm_edid *drm_edid = NULL;
 	struct t6_edid_limits lim = { 0 };
 	u8 edid[EDID_LENGTH];
+	u8 et[T6_EDID_TIMINGS][T6_RES_ENTRY_SIZE];
+	unsigned int et_count, j;
+	const u8 *pref_timing = NULL;
+	bool et_pref;
 	int edid_len;
 	int pref_w, pref_h;
 	bool filter;
@@ -159,6 +184,9 @@ static int t6_connector_get_modes(struct drm_connector *connector)
 	edid_len = head->edid_len;
 	if (edid_len >= EDID_LENGTH)
 		memcpy(edid, head->edid_data, EDID_LENGTH);
+	et_count = head->edid_timing_count;
+	et_pref = head->edid_timing_pref;
+	memcpy(et, head->edid_timings, et_count * T6_RES_ENTRY_SIZE);
 	spin_unlock(&head->edid_lock);
 
 	if (edid_len >= EDID_LENGTH) {
@@ -197,10 +225,18 @@ static int t6_connector_get_modes(struct drm_connector *connector)
 	 * offered 1920x1200 and 1600x1200). Smaller modes stay: monitors
 	 * scale them (1680x1050 worked on a 1080p monitor that does not list
 	 * it). If that leaves nothing, offer the unfiltered list.
+	 *
+	 * Last come the monitor's own detailed timings, built as the vendor
+	 * driver builds its custom modes (t6_build_timing), unless a built-in
+	 * or table mode has exactly the same timing. The monitor's first
+	 * detailed timing is the preferred mode when the adapter can show it.
 	 */
 	if (drm_edid)
 		t6_parse_edid_limits(edid, &lim);
 	filter = lim.count > 0;
+	if (drm_edid && et_pref &&
+	    t6_blob_clock_khz(et[0]) <= t6_head_max_clock(head))
+		pref_timing = et[0];
 	pref_w = T6_SCANOUT_WIDTH;
 	pref_h = T6_SCANOUT_HEIGHT;
 	if (drm_edid) {
@@ -240,8 +276,29 @@ again:
 			continue;
 		}
 		mode->type |= DRM_MODE_TYPE_DRIVER;
-		if (mode->hdisplay == pref_w && mode->vdisplay == pref_h &&
-		    drm_mode_vrefresh(mode) == 60)
+		if (pref_timing ? t6_timing_matches_mode(pref_timing, mode) :
+		    (mode->hdisplay == pref_w && mode->vdisplay == pref_h &&
+		     drm_mode_vrefresh(mode) == 60))
+			mode->type |= DRM_MODE_TYPE_PREFERRED;
+		drm_mode_probed_add(connector, mode);
+		count++;
+	}
+
+	for (j = 0; drm_edid && j < et_count; j++) {
+		if (t6_blob_clock_khz(et[j]) > t6_head_max_clock(head))
+			continue;
+		mode = drm_mode_create(connector->dev);
+		if (!mode)
+			continue;
+		t6_blob_to_mode(et[j], mode);
+		if (t6_static_timing_exists(head, mode) ||
+		    t6_connector_mode_valid_common(head, mode) != MODE_OK ||
+		    (filter && !t6_edid_limits_allow(&lim, mode))) {
+			drm_mode_destroy(connector->dev, mode);
+			continue;
+		}
+		mode->type |= DRM_MODE_TYPE_DRIVER;
+		if (et[j] == pref_timing)
 			mode->type |= DRM_MODE_TYPE_PREFERRED;
 		drm_mode_probed_add(connector, mode);
 		count++;
@@ -257,21 +314,23 @@ again:
 
 /*
  * Accept only modes that atomic_enable can program on this output: a
- * built-in timing blob or an entry in the output's device mode table.
- * Reject anything else (including user-added modes) to prevent sending
- * timing data the T6 chip can't handle.
+ * built-in timing blob, an entry in the output's device mode table or a
+ * timing built from the monitor's EDID (t6_head_find_timing). Reject
+ * anything else (including user-added modes) to prevent sending timing
+ * data the T6 chip can't handle.
  */
 static enum drm_mode_status
-t6_connector_mode_valid_common(const struct t6_head *head,
+t6_connector_mode_valid_common(struct t6_head *head,
 			       const struct drm_display_mode *mode)
 {
+	u8 timing[T6_RES_ENTRY_SIZE];
+
 	/* The adapter is specified for at most 60 Hz; its table also lists 75 Hz. */
 	if (mode->hdisplay > T6_MAX_WIDTH || mode->vdisplay > T6_MAX_HEIGHT ||
 	    drm_mode_vrefresh(mode) > 60)
 		return MODE_BAD;
 
-	if (!t6_head_mode_blob(head, mode->hdisplay, mode->vdisplay,
-			       drm_mode_vrefresh(mode)))
+	if (!t6_head_find_timing(head, mode, timing))
 		return MODE_NOMODE;
 
 	return MODE_OK;

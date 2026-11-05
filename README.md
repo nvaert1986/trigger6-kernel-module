@@ -1,4 +1,4 @@
-# MCT Trigger 6 (T6) USB display driver for Linux, release `1.0.2`
+# MCT Trigger 6 (T6) USB display driver for Linux, release `1.0.3`
 
 An out-of-tree Linux DRM/KMS kernel driver and a small user-space helper for the
 MCT "T6 USB Station" chipset, as found in the **StarTech USB32HDES** USB 3.0 to HDMI adapter.
@@ -6,7 +6,7 @@ This release reaches about **60 new frames per second at 1920x1080** on the test
 setup, with a stable USB connection.
 
 > **Status: experimental.** Tested on one adapter model (see
-> [Tested configuration](#tested-configuration)). Version 1.0.2 works on Wayland and builds on Arch Linux (kernel 7.2) and
+> [Tested configuration](#tested-configuration)). Version 1.0.3 works on Wayland and builds on Arch Linux (kernel 7.2) and
 > Debian 13 (kernel 6.12). **On Xorg, unplugging the USB adapter crashes the X server** (a bug in Xorg, reported to
 > Debian, see [Limitations](#limitations)); unplugging only the HDMI cable is fine. Use at your own risk.
 
@@ -38,12 +38,14 @@ setup, with a stable USB connection.
 | **USB ID** | **`0711:5601`** (`idVendor=0711`, `idProduct=5601`) |
 | On-board memory reported by the device | 58 MB |
 | USB link | Direct to a USB 3.0 port (5000 Mbit/s). The first tests through a USB 2.0 hub were not usable for high frame rates |
-| Monitor | Dell P2725HE, 1920x1080 @ 60 Hz |
+| Monitors | Dell P2725HE, 1920x1080 @ 60 Hz (all versions); with 1.0.3 also iiyama PL2595W (1920x1200), Dell P2317H, P2726HE, P2319H and P2422H, HP E233 (see the [1.0.3 entry](#103-2026-11-05)) |
 | Host OS / kernel (`0.9.0-r8` measurements) | Arch Linux, `7.2.9-arch1-1`, Xorg |
 | 1.0.0 hardware test | Works on Wayland. On Xorg it works until the USB adapter is unplugged: then the X server crashes (see [Limitations](#limitations)) |
 | 1.0.0 builds | Arch Linux kernel 7.2, Debian 13 kernel 6.12, Linux 6.18.59 (`W=1`, no warnings) |
 | 1.0.0 start-up test | Gentoo, Linux 6.18.59 with enforced module signatures: plug-in, chip init, mode table and unplug checked against a USB capture (no monitor attached yet) |
 | 1.0.0 and 1.0.1 monitor test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), Dell P2725HE: picture, helper, mode switches, HDMI hotplug, flip-done events and `keepalive_ms=0`, checked against `t6_metrics` and a USB capture |
+| 1.0.3 monitor test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), seven monitors from three brands: each detected on plug-in, set to its native mode, clean picture, no errors |
+| 1.0.3 builds | Linux 6.18.59 (`W=1`, no warnings); uses no kernel interfaces beyond those 1.0.0 needs, which builds on Debian 13 (6.12) and Arch Linux (7.2) |
 | 1.0.2 helper autostart | Gentoo with systemd, KDE Plasma (Wayland): udev rule and user service start the helper on plug-in and end it cleanly on unplug |
 | 1.0.1 builds | Linux 6.18.59 (`W=1`, no warnings); uses no kernel interfaces beyond those 1.0.0 needs, which builds on Debian 13 (6.12) and Arch Linux (7.2) |
 
@@ -245,7 +247,7 @@ name shown under `/sys/bus/usb/drivers/trigger6/`) and retry after a second or t
 sudo apt install dkms build-essential linux-headers-amd64 libyuv0   # Debian 13
 sudo pacman -S --needed dkms base-devel linux-headers libyuv        # Arch (linux-lts-headers for the LTS kernel)
 
-VER=1.0.2
+VER=1.0.3
 sudo mkdir -p /usr/src/trigger6-$VER
 sudo cp -r kernel dkms.conf LICENSE README.md /usr/src/trigger6-$VER/
 sudo dkms add     -m trigger6 -v $VER
@@ -259,7 +261,7 @@ sudo modprobe trigger6
 `dkms.conf` is in the repository root (an identical copy is in `packaging/debian13/`) and is copied along as shown.
 DKMS then rebuilds the module for each newly installed kernel. Remember that matching headers must be installed.
 `trigger6.conf` sets `primary_userspace_nv12=1`, so the module uses the fast helper whenever it runs.
-Check the installed version with `modinfo -F version trigger6` (prints `1.0.2`).
+Check the installed version with `modinfo -F version trigger6` (prints `1.0.3`).
 
 ### C. Install the helper
 
@@ -361,13 +363,15 @@ Set one at load time with `modprobe trigger6 name=value`.
 
 ## Limitations
 
-* 1920x1080 @ 60 Hz is the only validated mode. The hardware is specified up to 1920x1200 @ 60 Hz, which is *not* validated here.
+* Validated: 1920x1080 @ 60 Hz on six monitors and 1920x1200 @ 60 Hz (the adapter's maximum) on one, plus the mode
+  switches listed in the checklist. Other modes are offered but were not all tried.
 * Offered modes: the built-in ones (1920x1080 @ 60/30, 1600x900, 1280x1024, 1280x800, 1280x720, 1024x768, 800x600,
   640x480) plus every other mode in the adapter's own mode table up to 1920x1200 and 60 Hz (on the captured adapter:
   1920x1080@50, 1360x768, 1366x768, 1440x900, 1680x1050, 1600x1200, 1920x1200 and more). The adapter is specified for
   at most 60 Hz, so the 75 Hz entries in its table are not offered. With a readable EDID, modes larger than any mode
   the monitor lists, or outside its refresh and pixel clock limits, are left out (item 28): on a 1080p monitor with a
-  48-100 Hz range that removes 1920x1200, 1600x1200 and 1920x1080@30.
+  48-100 Hz range that removes 1920x1200, 1600x1200 and 1920x1080@30. The monitor's own detailed timings are offered
+  as well, up to 1920x1200, 60 Hz and the fastest clock in the adapter's table (item 31).
 * HDMI audio is not implemented.
 * NV12 uses 4:2:0 colour, so tiny coloured text is slightly less sharp than RGB.
 * The reported FPS is the number of frames sent. It is not a camera or analyser measurement of visible frames.
@@ -383,6 +387,54 @@ Set one at load time with `modprobe trigger6 name=value`.
   and recovery from a USB transport fault (step 7, no clean way to cause one).
 
 ## Changelog
+
+### 1.0.3 (2026-11-05)
+
+Upgrading an existing DKMS install: run `dkms remove trigger6/1.0.2 --all`, then install `1.0.3` as in
+[section B](#b-permanent-install-with-dkms-debian-13--ubuntu--arch). The helper and its service are unchanged since
+1.0.2. Includes everything from `1.0.2` below.
+
+**Testing status, stated plainly:** builds without warnings (`W=1`) against Linux 6.18.59. Tested on the adapter on
+Gentoo, Linux 6.18.59, KDE Plasma (Wayland), with seven monitors swapped on the running system (no reload in
+between). Every monitor was detected on plug-in, got its native mode and showed a clean picture, with no USB, send
+or unknown-event errors:
+
+| Monitor | Native | Result with 1.0.3 |
+|---|---|---|
+| iiyama PL2595W | 1920x1200 | Native 1920x1200 @ 60 Hz with the monitor's own reduced-blanking timing (154 MHz); the monitor reports 1920x1200, 74 kHz, 60 Hz. With 1.0.2 it only got 1920x1080 |
+| Dell P2725HE | 1920x1080 | Unchanged from 1.0.2: 1080p60 from the built-in timing, same mode list |
+| Dell P2317H | 1920x1080 | 1080p60; 1920x1080@50 not offered (EDID range 56-76 Hz) |
+| Dell P2726HE | 1920x1080 | 1080p60; 1920x1080@50 offered (EDID range 48-120 Hz) |
+| Dell P2319H | 1920x1080 | 1080p60; 1920x1080@50 not offered (EDID range 56-76 Hz) |
+| HP E233 | 1920x1080 | 1080p60; 1920x1080@50 offered (EDID range 50-60 Hz) |
+| Dell P2422H | 1920x1080 | 1080p60; 1920x1080@50 not offered (EDID range 56-76 Hz) |
+
+None of the 1080p monitors got 1920x1200 or 1600x1200 offered. On the six 1080p monitors the EDID's preferred timing
+is identical to the built-in 1080p60 timing, so it is not offered twice.
+
+31. **The monitor's own timings could not be used** (`t6_build_timing`, `t6_build_edid_timings`,
+    `t6_head_find_timing`). A mode could only be set when a built-in timing block or the adapter's own mode table had
+    one for that size and refresh rate. The iiyama PL2595W wants 1920x1200 @ 60 Hz with reduced blanking at 154 MHz
+    and accepts at most 170 MHz; the adapter's table only has 1920x1200 @ 60 Hz at 193.25 MHz, which the EDID filter
+    (item 28) correctly drops, so the monitor ran at 1920x1080. The vendor driver builds custom timing blocks for such
+    modes (`T6InDisp.dll` 0x1800f5d90, clock helper 0x1800f7530): a 40 MHz reference, a VCO of 800-1600 MHz and a
+    post divider of 4, 8, 16 or 32, so the pixel clock is 10000, 5000, 2500 or 1250 kHz * (IDIV + FNUM/1000), with
+    the smallest divider that reaches 800 MHz; the other fields come straight from the timing, "reduced" is 0, and
+    byte 31 is 2 for widths 1360 and 1680 and for widths above 1920 that are not a multiple of 32. *Fix:* the driver
+    builds such a block for every detailed timing in the monitor's EDID that the adapter can show (progressive, up
+    to 1920x1200, at most 60 Hz, no faster than the fastest mode in the adapter's own table), offers them after the
+    built-in and table modes unless one of those has exactly the same timing, and marks the monitor's first detailed
+    timing as preferred. Modes are now matched by their exact timing (clock, sizes, sync, totals) rather than size
+    and refresh, so the iiyama's 1920x1200 gets its 154 MHz timing and not the table's 193.25 MHz one, and the
+    driver remembers the last timing it programmed, so a re-init after replug restores exactly that timing. Checked
+    offline: the generator reproduces all 30 entries of the adapter's table except for two expected differences: 11
+    entries where the vendor's floating-point truncation makes FNUM one lower (at most 5 kHz; the driver uses the exact
+    value) and the "reduced" byte the table sets on 1600x900. The misleading log line "the current reverse-engineered
+    modeset path is fixed to 1920x1080@60" is replaced by one that reports the monitor's preferred size and how many
+    of its timings are usable.
+
+Swapping monitors: on reconnect the driver first restores the last programmed timing; the desktop then sets the new
+monitor's mode a moment later. A monitor that cannot show the previous timing can stay black for that moment.
 
 ### 1.0.2 (2026-11-05)
 
@@ -517,7 +569,7 @@ Each item below is backed by the USB capture of the vendor driver and/or static 
 * The second logical output is still allocated (about 31 MB) and polled every 5 s on single-output adapters. The
   USB ID does not say whether the board has one or two outputs, so this needs a probe-time capability check first.
 
-#### Hardware test checklist (0.9.0-r9 to 1.0.2 changes)
+#### Hardware test checklist (0.9.0-r9 to 1.0.3 changes)
 
 Result so far: fully working on Wayland; on Xorg, unplugging the USB adapter crashes the X server (see
 [Limitations](#limitations)). Confirmed on the adapter: steps 1, 2, 3 (the monitor went to standby and stayed
@@ -678,6 +730,7 @@ original companion tools goes to the original author. The copyright notice
 * The user-space SIMD bridge (`trigger6_bridge.h`, `trigger6-fast`), the asynchronous two-URB USB path and the removal of per-frame copies.
 * `0.9.0-r9`: review fixes for fault recovery, probe error handling, output switch-off, suspend/resume, mode handling and the helper, plus corrected 1080p timing and colour data.
 * `1.0.0`: init and mode-set sequence, interrupt endpoint, the adapter's own mode table and sync encoding (see [Changelog](#changelog)).
+* `1.0.3`: the monitor's own EDID timings, built as the vendor driver builds its custom modes, so 1920x1200 monitors get their native mode.
 * `1.0.2`: the helper ends cleanly when the adapter is unplugged instead of being restarted every 2 s.
 * `1.0.1`: interrupt events decoded as the vendor driver does (flip done, monitor hotplug), modes filtered by the monitor's EDID, and no second chip init at plug-in.
 * This work was done by the fork maintainer together with AI coding assistants (OpenAI Codex, then Anthropic Claude Code). Protocol facts also come from a static analysis of the vendor's Windows driver. No vendor code is included.
