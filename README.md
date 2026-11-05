@@ -55,6 +55,7 @@ setup, with a stable USB connection.
 | 1.1.0-beta1 audio test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), PipeWire: sound card registered, playback through `aplay` and PipeWire, USB transfers checked with usbmon. **Not heard**: no monitor with speakers or audio output available |
 | 1.1.0-beta2 builds | Linux 6.18.59 and Debian 13 `linux-headers-6.12.107+deb13-amd64` (cross-build, `W=1`, no warnings); on 6.12 the audio code uses `hrtimer_init()`, on 6.18 `hrtimer_setup()` |
 | 1.0.5 monitor swap test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland): HP E233, iiyama PL2595W and Dell P2319H swapped on the running system; each started on its own preferred timing, no mode change by the desktop afterwards |
+| 1.0.6 builds | Linux 6.18.59 (`W=1`, no warnings); compiled code identical to 1.0.5, no new kernel interfaces |
 | 1.0.5 builds | Linux 6.18.59 (`W=1`, no warnings); uses no kernel interfaces beyond those 1.0.0 needs, which builds on Debian 13 (6.12) and Arch Linux (7.2) |
 | 1.0.4 builds | Linux 6.18.59 (`W=1`, no warnings); uses no kernel interfaces beyond those 1.0.0 needs, which builds on Debian 13 (6.12) and Arch Linux (7.2) |
 | 1.0.4 keepalive test | Same setup, `keepalive_ms=0` on six monitors (Dell P2725HE, P2319H, P2726HE, P2317H, iiyama PL2595W, HP E233): picture kept for 59 to 88 s without a single frame |
@@ -480,6 +481,24 @@ not by ear**: none of the available monitors has speakers or an audio output.
     takes the application's audio at the rate it plays; the lead is reported as latency.
 
 
+### 1.0.6 (2026-11-05)
+
+Maintenance release in the 1.0 series (branch `1.0.x`): a correction of names and documentation, **no change in
+behaviour**. The compiled code is identical to 1.0.5; only the version string differs. The same fix is on `main` and
+will be in the next 1.1.0 release.
+
+**Testing status, stated plainly:** builds without warnings (`W=1`) against Linux 6.18.59; the machine code and
+read-only data of `trigger6_drv.o` were compared with a 1.0.5 build and are identical. Not re-tested on the adapter,
+as nothing it receives has changed.
+
+39. **Request `0x23` is the audio volume, not a colour setting** (`t6_init_volume`, `T6_REQ_AUD_NODE_SET`, chip
+    init). Inherited from upstream as `T6_REQ_SET_COLOR` / `t6_init_color`, and described as colour setup in items 17
+    and 20. A vendor USB capture with Windows playing audio shows the vendor's audio driver sending exactly this
+    payload to set the HDMI audio volume (audio node 0, channels left and right, 31 of 31), and mct-linux documents
+    `0x23` as the audio node-value request. The driver still sends it at chip init, as the vendor driver does; only
+    the names, comments and documentation were wrong. The colour-related requests in chip init are the gamma tables
+    (`0x1C`/`0x1D`, item 20). In 1.1.0 the audio code uses the same request to set the volume (item 37).
+
 ### 1.0.5 (2026-11-05)
 
 Upgrading an existing DKMS install: run `dkms remove trigger6/1.0.4 --all`, then install `1.0.5` as in
@@ -689,7 +708,7 @@ warnings (`W=1`) against Linux 6.18.59. Checked offline against the vendor drive
 of the captured adapter pass the table reader and the mode lookup. **Hardware test on the adapter:** fully working on
 Wayland, including the changed init and mode-change sequence (items 20 and 21). On Xorg everything works except
 unplugging the USB adapter, which crashes the X server with a segmentation fault (an Xorg bug, reported to Debian;
-see [Limitations](#limitations)). Unplugging the HDMI cable works on both. Colours confirmed correct (item 17).
+see [Limitations](#limitations)). Unplugging the HDMI cable works on both. Colours confirmed correct.
 A start-up test on Linux 6.18.59 (adapter without monitor, recorded with usbmon) showed the new init sequence
 (items 20 and 23) on the wire in the same order as the vendor capture, with every request accepted, 30 entries read
 from the mode table (item 22), the interrupt endpoint running (item 18) and a clean unplug. That test also showed a
@@ -708,10 +727,10 @@ Each item below is backed by the USB capture of the vendor driver and/or static 
     capture), so test whether the picture still blanks with `keepalive_ms=0` now that the endpoint is serviced.
 19. **No NV12 startup frames** (reverts item 8). Only raw outputs are primed, as before 0.9.0-r9. The vendor driver sends
     no startup frames at all; its first bulk transfer is a real frame.
-20. **Chip init follows the vendor order** (`t6_chip_init`). Colour setup first, LUT reset for both outputs
-    (`0x1C` 0x0000/0x0100), one all-zero `0x31`, the per-output mode tables, `SET_RESOLUTION` and enable per output,
-    HDMI audio off, then an identity gamma upload with commit per output (`0x1D` x3, `0x1C` (output << 8) | 2).
-    Before: colour after the resets, `0x31` per output, and two `0x24` requests that turned out to be **HDMI audio
+20. **Chip init follows the vendor order** (`t6_chip_init`). Audio volume first (`0x23`; described as colour setup
+    until 1.0.6, item 39), LUT reset for both outputs (`0x1C` 0x0000/0x0100), one all-zero `0x31`, the per-output
+    mode tables, `SET_RESOLUTION` and enable per output, HDMI audio off, then an identity gamma upload with commit per output (`0x1D` x3, `0x1C` (output << 8) | 2).
+    Before: the volume after the resets, `0x31` per output, and two `0x24` requests that turned out to be **HDMI audio
     off/on** (payload: on/off, buffer 0x2580 bytes, 2 channels), so every init switched audio on without audio data;
     and `0x1C` 0x0002 committed output 0's gamma table without uploading one. `0x24` is now only sent as "off".
 21. **Mode change = `SET_RESOLUTION` + enable** (`t6_crtc_atomic_enable`), as the vendor driver's mode-set routine
@@ -772,7 +791,7 @@ settings (on KDE Plasma: `kscreen-doctor`) instead.
 8. `systemctl --user stop trigger6-fast` on a static desktop returns at once (item 14).
 9. 1920x1080@60 shows a stable picture; the monitor's OSD reports 1920x1080 60 Hz. If available, also try a monitor
    that showed "No Signal" before (item 16).
-10. Colours look right: compare with the same image on another output (item 17).
+10. Colours look right: compare with the same image on another output.
 11. `t6_metrics`: `int_running=1`, and `head0 flips_done` grows with `sent_frames` (item 18). Report any `T6 event`
     lines in `dmesg`, especially around monitor unplug/replug: they are unknown event types.
 12. Leave a static desktop for a few minutes with the default `keepalive_ms=0`: does the picture blank (items 18, 35)?
@@ -865,17 +884,17 @@ hardware-tested as part of `1.0.0` (see its testing status above).
     and keeps interrupting the reader with SIGUSR2 until it has left its loop.
 15. Docs: `DEPENDENCIES.md` header said `0.9.0-r7`; the README claimed `dkms.conf` only ships in `packaging/debian13/`.
 
-#### Timing and colour data (also inherited from upstream `mct-t6-linux`)
+#### Timing and volume data (also inherited from upstream `mct-t6-linux`)
 
 16. **Corrupt 1080p timing** (`t6_mode_1080p`, `t6_mode_1080p30`). Both blobs had hsync_start 1816 and vsync_start
     1000, which lie inside the visible 1920x1080 area, and a vsync width of 29 lines. Chip init sends the 1080p60
     blob at every start. *Fix:* the sync fields now hold the CEA-861 values (hsync 2008/44, vsync 1084/5). The new
     1080p60 blob is byte-identical to the 1920x1080@60 entry in the adapter's own mode table (request `0x89`).
     Tolerant monitors such as the tested Dell accepted the old values; stricter ones may have shown "No Signal".
-17. **Colour setup shifted by one byte** (`t6_init_color`, request `0x23`). The vendor driver sends ten
+17. **Volume request shifted by one byte** (`t6_init_volume`, then called `t6_init_color`, request `0x23`; described
+    as colour setup until 1.0.6, see item 39). The vendor driver sends ten
     little-endian u32 values (3, 0, 0x1f, 0x1f, then six times 0x0f). The inherited copy lacked the leading `0x03`
     byte, so every field was misaligned. *Fix:* the blob is now byte-identical to the vendor driver's request.
-    *Watch the colours and picture on the first test: this changes chip configuration that has been wrong all along.*
 
 Evidence: `trigger/upstream-trigger6/captures/mctt6.pcapng`, a USB capture of a 0711:5601 under the vendor
 Windows driver (2023 driver stack), plus static analysis of the 2025 `T6InDisp.dll`. The 1600x900 and 1280x800 blobs
@@ -909,10 +928,11 @@ original companion tools goes to the original author. The copyright notice
 * Stability changes (no partial VRAM writes by default, EDID caching, stable active mode, per-device bulk mutex, keepalive-buffer fixes).
 * Primary-output NV12 transport, 1 047 552-byte USB chunks, three device-side frame slots.
 * The user-space SIMD bridge (`trigger6_bridge.h`, `trigger6-fast`), the asynchronous two-URB USB path and the removal of per-frame copies.
-* `0.9.0-r9`: review fixes for fault recovery, probe error handling, output switch-off, suspend/resume, mode handling and the helper, plus corrected 1080p timing and colour data.
+* `0.9.0-r9`: review fixes for fault recovery, probe error handling, output switch-off, suspend/resume, mode handling and the helper, plus corrected 1080p timing and volume request data.
 * `1.0.0`: init and mode-set sequence, interrupt endpoint, the adapter's own mode table and sync encoding (see [Changelog](#changelog)).
 * `1.1.0-beta2`: Debian 13 (6.12) build of the audio code confirmed.
 * `1.1.0-beta1`: HDMI audio as an ALSA sound card (beta: tested virtually, physically untested), ported from mct-linux and adapted for PipeWire.
+* `1.0.6`: request `0x23` correctly named as the audio volume (no change in behaviour).
 * `1.0.5`: a different monitor starts on its own preferred timing instead of the previous monitor's.
 * `1.0.4`: only the outputs the adapter reports (request `0xB3`), so single-output adapters no longer carry a second output; event flag `0x10` resends the picture; keepalive off by default; `make load` / `make unload`.
 * `1.0.3`: the monitor's own EDID timings, built as the vendor driver builds its custom modes, so 1920x1200 monitors get their native mode.

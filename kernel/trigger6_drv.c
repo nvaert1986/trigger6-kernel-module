@@ -276,15 +276,18 @@ MODULE_PARM_DESC(serialize_usb_bus,
 
 /*
  * Hardware init data captured from Windows USB traces.
- * These register blobs configure the T6 color pipeline, display timing,
- * and 1920x1080 @ 60 Hz mode during chip initialisation.
+ * These blobs set the HDMI audio volume, display timing, and the
+ * 1920x1080 @ 60 Hz mode during chip initialisation.
  *
- * t6_init_color is ten little-endian u32 values, byte for byte what the
+ * t6_init_volume is ten little-endian u32 values, byte for byte what the
  * vendor Windows driver sends with request 0x23 (mctt6.pcapng, frame 120):
- * 3, 0, 0x1f, 0x1f, then six times 0x0f. The copy inherited from upstream
+ * 3, 0, 0x1f, 0x1f, then six times 0x0f. It sets audio node 0 (the volume):
+ * channel mask 0x03 (left and right), then left and right to 31 of 31.
+ * Upstream called it the colour setup, but it is the volume request the
+ * vendor's audio driver sends (t6sta.sys). The copy inherited from upstream
  * lacked the leading 0x03 byte, so every field was shifted by one byte.
  */
-static const u8 t6_init_color[] = {
+static const u8 t6_init_volume[] = {
 	0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 	0x1f, 0x00, 0x00, 0x00, 0x1f, 0x00, 0x00, 0x00,
 	0x0f, 0x00, 0x00, 0x00, 0x0f, 0x00, 0x00, 0x00,
@@ -2025,10 +2028,10 @@ static int t6_load_identity_lut(struct t6_device *t6, struct t6_head *head)
 
 /*
  * Chip init in the order the vendor Windows driver uses (USB capture of a
- * 0711:5601, frames 120-258): colour setup, LUT reset for both outputs, one
+ * 0711:5601, frames 120-258): audio volume, LUT reset for both outputs, one
  * all-zero 0x31, [mode tables], then per output SET_RESOLUTION and enable,
  * audio off, and an identity gamma upload with commit. The old sequence sent
- * colour after the resets, 0x31 per output, wrapped everything in two 0x24
+ * the volume after the resets, 0x31 per output, wrapped everything in two 0x24
  * requests (HDMI audio off, then *on* without audio data) and committed the
  * LUT of output 0 without uploading one.
  */
@@ -2114,8 +2117,8 @@ static int t6_chip_init(struct t6_device *t6, bool read_tables)
 		init_head[0] = true;
 
 	t6->init_mask = 0;
-	ret = t6_ctrl_out(t6, T6_REQ_SET_COLOR, 0, 0,
-			  t6_init_color, sizeof(t6_init_color));
+	ret = t6_ctrl_out(t6, T6_REQ_AUD_NODE_SET, 0, 0,
+			  t6_init_volume, sizeof(t6_init_volume));
 	if (ret < 0)
 		return ret;
 	/* Both pipes of the chip, also on single-output adapters (tested). */

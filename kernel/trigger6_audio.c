@@ -37,7 +37,6 @@
 
 #include "trigger6.h"
 
-#define T6_REQ_AUD_NODE_SET	0x23	/* out: node values, 40 bytes */
 #define T6_REQ_AUD_SET		0x24	/* out: set engine state, 16 bytes */
 #define T6_REQ_AUD_NODE_CAPS	0xa2	/* in: node type and range, 16 bytes */
 #define T6_REQ_AUD_NODE_VALUE	0xa3	/* in: node values, 40 bytes */

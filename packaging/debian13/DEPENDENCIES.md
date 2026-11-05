@@ -67,6 +67,10 @@ Without the helper the driver falls back to in-kernel conversion (~29 fps).
 - Compiled against 6.18.59 (Gentoo, `W=1`, no errors or warnings).
 - Tested on the adapter under KDE Plasma (Wayland), Gentoo with kernel 6.18.59: HP E233, iiyama PL2595W and Dell P2319H swapped on the running system; each monitor started on its own preferred timing, without a mode change by the desktop afterwards.
 
+## 1.0.6 - additional checks
+- No new dependencies and no change in behaviour: request `0x23` renamed from colour setup to audio volume.
+- Compiled against 6.18.59 (Gentoo, `W=1`, no errors or warnings); the compiled code is identical to 1.0.5.
+
 ## 1.1.0-beta1 - additional checks
 - HDMI audio as an ALSA sound card ("Trigger6 USB to HDMI Adapter"). No new packages; the kernel needs ALSA PCM (`CONFIG_SND_PCM`, standard in Debian). PipeWire (Debian 13 default) offers it as an extra sink.
 - Compiled against 6.18.59 (Gentoo, `W=1`, no errors or warnings). Not yet compiled against Debian 13 (kernel 6.12), where the audio code uses `hrtimer_init()` instead of `hrtimer_setup()`.

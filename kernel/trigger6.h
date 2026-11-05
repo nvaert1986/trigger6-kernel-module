@@ -71,7 +71,8 @@
 /* Vendor requests */
 #define T6_REQ_MONITOR_CTRL	0x03	/* wValue=output, wIndex=1 on / 0 off */
 #define T6_REQ_SET_RESOLUTION	0x12	/* wValue=output, 32-byte timing blob */
-#define T6_REQ_SET_COLOR	0x23
+/* 0x23 sets audio node values (node 0 = volume), not colour: 40 bytes */
+#define T6_REQ_AUD_NODE_SET	0x23
 /*
  * 0x24 is HDMI audio start/stop, not display timing: payload u32 on/off,
  * u32 0, u32 buffer bytes (0x2580), u16 0, u16 channels (2). The vendor
