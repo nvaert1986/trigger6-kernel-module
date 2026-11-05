@@ -1,4 +1,4 @@
-# trigger6 1.0.0 - doel: Debian 13 (trixie), kernel 6.12.x LTS
+# trigger6 1.0.1 - doel: Debian 13 (trixie), kernel 6.12.x LTS
 
 ## Pakket `trigger6-dkms` (kernelmodule)
 | Dependency | Soort | Toelichting |
@@ -41,3 +41,8 @@ Zonder helper valt de driver terug op kernelconversie (~29 fps).
 - Vergeleken met de Windows-driver van de leverancier (USB-capture en `T6InDisp.dll`): init- en modusvolgorde, interrupt-endpoint 0x83, eigen modustabel van de adapter en sync-codering. Geen nieuwe dependencies. Nieuwe moduleparameter `keepalive_ms` (0 = uit).
 - Gecompileerd tegen Debian 13 (kernel 6.12), Arch Linux (kernel 7.2) en 6.18.59 (Gentoo, `W=1`, zonder fouten of waarschuwingen).
 - Getest op de adapter: werkt volledig onder Wayland. Onder Xorg crasht de X-server (SIGSEGV) bij het loskoppelen van de USB-adapter; loskoppelen van alleen de HDMI-kabel werkt wel. Gemeld bij Debian als Xorg-bug.
+
+## 1.0.1 - aanvullende controles
+- Geen nieuwe dependencies.
+- Gecompileerd tegen 6.18.59 (Gentoo, `W=1`, zonder fouten of waarschuwingen). Nog niet opnieuw gecompileerd tegen Debian 13 (kernel 6.12) en Arch Linux (kernel 7.2).
+- Getest op de adapter met een Dell P2725HE onder KDE Plasma (Wayland), Gentoo met kernel 6.18.59: beeld, helper, moduswissels, HDMI-hotplug, flip-done-events en een volledige start-up per aansluiting. Zie de changelog in `README.md`.

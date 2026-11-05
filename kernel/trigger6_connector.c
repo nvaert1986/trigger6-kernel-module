@@ -38,14 +38,116 @@ static enum drm_mode_status
 t6_connector_mode_valid_common(const struct t6_head *head,
 			       const struct drm_display_mode *mode);
 
+/*
+ * What the monitor says it can show, from the EDID base block (the only
+ * block read from the device): the sizes it lists and its range limits.
+ */
+struct t6_edid_limits {
+	u16 w[16], h[16];
+	unsigned int count;
+	unsigned int min_vfreq, max_vfreq;	/* Hz, 0 = not given */
+	unsigned int max_clock_khz;		/* 0 = not given */
+};
+
+static void t6_edid_limits_add(struct t6_edid_limits *lim, int w, int h)
+{
+	if (w > 0 && h > 0 && lim->count < ARRAY_SIZE(lim->w)) {
+		lim->w[lim->count] = w;
+		lim->h[lim->count] = h;
+		lim->count++;
+	}
+}
+
+static void t6_parse_edid_limits(const u8 *edid, struct t6_edid_limits *lim)
+{
+	bool edid_1_3 = edid[0x12] > 1 || edid[0x13] >= 3;
+	bool edid_1_4 = edid[0x12] > 1 || edid[0x13] >= 4;
+	unsigned int i;
+
+	memset(lim, 0, sizeof(*lim));
+
+	/* Established timings: only the largest sizes matter here. */
+	if (edid[0x23] & 0x03 || edid[0x24] & 0xc0)
+		t6_edid_limits_add(lim, 800, 600);
+	if (edid[0x24] & 0x0e)
+		t6_edid_limits_add(lim, 1024, 768);
+	if (edid[0x24] & 0x01)
+		t6_edid_limits_add(lim, 1280, 1024);
+
+	/* Standard timings */
+	for (i = 0; i < 8; i++) {
+		u8 b0 = edid[0x26 + 2 * i], b1 = edid[0x27 + 2 * i];
+		int w = (b0 + 31) * 8;
+
+		if (b0 <= 1)
+			continue;
+		switch (b1 >> 6) {
+		case 0:
+			t6_edid_limits_add(lim, w, edid_1_3 ? w * 10 / 16 : w);
+			break;
+		case 1:
+			t6_edid_limits_add(lim, w, w * 3 / 4);
+			break;
+		case 2:
+			t6_edid_limits_add(lim, w, w * 4 / 5);
+			break;
+		default:
+			t6_edid_limits_add(lim, w, w * 9 / 16);
+			break;
+		}
+	}
+
+	/* Detailed timings and the range limits descriptor */
+	for (i = 0; i < 4; i++) {
+		const u8 *d = edid + 0x36 + 18 * i;
+
+		if (d[0] || d[1]) {
+			t6_edid_limits_add(lim, d[2] | ((d[4] & 0xf0) << 4),
+					   d[5] | ((d[7] & 0xf0) << 4));
+		} else if (d[3] == 0xfd) {
+			lim->min_vfreq = d[5];
+			lim->max_vfreq = d[6];
+			/* EDID 1.4 rate offsets: bit 1 = max +255, bit 0 = min +255 */
+			if (edid_1_4 && (d[4] & 0x02)) {
+				lim->max_vfreq += 255;
+				if (d[4] & 0x01)
+					lim->min_vfreq += 255;
+			}
+			lim->max_clock_khz = d[9] * 10000;
+		}
+	}
+}
+
+/* True if the monitor lists a mode at least this large and the rates fit. */
+static bool t6_edid_limits_allow(const struct t6_edid_limits *lim,
+				 const struct drm_display_mode *mode)
+{
+	unsigned int vrefresh = drm_mode_vrefresh(mode);
+	unsigned int i;
+
+	if (!lim->count)
+		return true;
+	if (lim->min_vfreq && lim->max_vfreq &&
+	    (vrefresh + 1 < lim->min_vfreq || vrefresh > lim->max_vfreq + 1))
+		return false;
+	if (lim->max_clock_khz && (unsigned int)mode->clock > lim->max_clock_khz)
+		return false;
+	for (i = 0; i < lim->count; i++)
+		if (mode->hdisplay <= lim->w[i] && mode->vdisplay <= lim->h[i])
+			return true;
+	return false;
+}
+
 static int t6_connector_get_modes(struct drm_connector *connector)
 {
 	struct t6_head *head = t6_head_from_connector(connector);
 	struct drm_display_mode *mode;
 	const struct drm_edid *drm_edid = NULL;
+	struct t6_edid_limits lim = { 0 };
 	u8 edid[EDID_LENGTH];
 	int edid_len;
 	int pref_w, pref_h;
+	bool filter;
 	int count = 0;
 	int i;
 
@@ -89,7 +191,16 @@ static int t6_connector_get_modes(struct drm_connector *connector)
 	 * output's own device table (request 0x89). Each DRM mode carries
 	 * exactly the timing its blob programs, and every offered mode can
 	 * be programmed: atomic_enable looks it up the same way.
+	 *
+	 * With an EDID, skip modes larger than any mode the monitor lists or
+	 * outside its refresh and pixel clock limits (a 1080p monitor was
+	 * offered 1920x1200 and 1600x1200). Smaller modes stay: monitors
+	 * scale them (1680x1050 worked on a 1080p monitor that does not list
+	 * it). If that leaves nothing, offer the unfiltered list.
 	 */
+	if (drm_edid)
+		t6_parse_edid_limits(edid, &lim);
+	filter = lim.count > 0;
 	pref_w = T6_SCANOUT_WIDTH;
 	pref_h = T6_SCANOUT_HEIGHT;
 	if (drm_edid) {
@@ -103,6 +214,7 @@ static int t6_connector_get_modes(struct drm_connector *connector)
 		}
 	}
 
+again:
 	for (i = 0; i < t6_builtin_mode_count + (int)head->mode_count; i++) {
 		const u8 *blob;
 
@@ -122,7 +234,8 @@ static int t6_connector_get_modes(struct drm_connector *connector)
 		if (!mode)
 			continue;
 		t6_blob_to_mode(blob, mode);
-		if (t6_connector_mode_valid_common(head, mode) != MODE_OK) {
+		if (t6_connector_mode_valid_common(head, mode) != MODE_OK ||
+		    (filter && !t6_edid_limits_allow(&lim, mode))) {
 			drm_mode_destroy(connector->dev, mode);
 			continue;
 		}
@@ -132,6 +245,10 @@ static int t6_connector_get_modes(struct drm_connector *connector)
 			mode->type |= DRM_MODE_TYPE_PREFERRED;
 		drm_mode_probed_add(connector, mode);
 		count++;
+	}
+	if (!count && filter) {
+		filter = false;
+		goto again;
 	}
 
 	drm_edid_free(drm_edid);

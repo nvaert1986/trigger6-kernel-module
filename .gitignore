@@ -9,6 +9,8 @@
 Module.symvers
 modules.order
 .tmp_versions/
+# Local notes
+TODO.md
 # Helper binary
 /trigger6-fast
 /userspace/trigger6-fast

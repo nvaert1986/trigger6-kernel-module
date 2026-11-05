@@ -1,4 +1,4 @@
-# MCT Trigger 6 (T6) USB display driver for Linux, release `1.0.0`
+# MCT Trigger 6 (T6) USB display driver for Linux, release `1.0.1`
 
 An out-of-tree Linux DRM/KMS kernel driver and a small user-space helper for the
 MCT "T6 USB Station" chipset, as found in the **StarTech USB32HDES** USB 3.0 to HDMI adapter.
@@ -6,7 +6,7 @@ This release reaches about **60 new frames per second at 1920x1080** on the test
 setup, with a stable USB connection.
 
 > **Status: experimental.** Tested on one adapter model (see
-> [Tested configuration](#tested-configuration)). Version 1.0.0 works on Wayland and builds on Arch Linux (kernel 7.2) and
+> [Tested configuration](#tested-configuration)). Version 1.0.1 works on Wayland and builds on Arch Linux (kernel 7.2) and
 > Debian 13 (kernel 6.12). **On Xorg, unplugging the USB adapter crashes the X server** (a bug in Xorg, reported to
 > Debian, see [Limitations](#limitations)); unplugging only the HDMI cable is fine. Use at your own risk.
 
@@ -43,6 +43,8 @@ setup, with a stable USB connection.
 | 1.0.0 hardware test | Works on Wayland. On Xorg it works until the USB adapter is unplugged: then the X server crashes (see [Limitations](#limitations)) |
 | 1.0.0 builds | Arch Linux kernel 7.2, Debian 13 kernel 6.12, Linux 6.18.59 (`W=1`, no warnings) |
 | 1.0.0 start-up test | Gentoo, Linux 6.18.59 with enforced module signatures: plug-in, chip init, mode table and unplug checked against a USB capture (no monitor attached yet) |
+| 1.0.0 and 1.0.1 monitor test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), Dell P2725HE: picture, helper, mode switches, HDMI hotplug, flip-done events and `keepalive_ms=0`, checked against `t6_metrics` and a USB capture |
+| 1.0.1 builds | Linux 6.18.59 (`W=1`, no warnings); not yet rebuilt on Debian 13 (6.12) and Arch Linux (7.2) |
 
 Check your own adapter with:
 
@@ -242,7 +244,7 @@ name shown under `/sys/bus/usb/drivers/trigger6/`) and retry after a second or t
 sudo apt install dkms build-essential linux-headers-amd64 libyuv0   # Debian 13
 sudo pacman -S --needed dkms base-devel linux-headers libyuv        # Arch (linux-lts-headers for the LTS kernel)
 
-VER=1.0.0
+VER=1.0.1
 sudo mkdir -p /usr/src/trigger6-$VER
 sudo cp -r kernel dkms.conf LICENSE README.md /usr/src/trigger6-$VER/
 sudo dkms add     -m trigger6 -v $VER
@@ -256,7 +258,7 @@ sudo modprobe trigger6
 `dkms.conf` is in the repository root (an identical copy is in `packaging/debian13/`) and is copied along as shown.
 DKMS then rebuilds the module for each newly installed kernel. Remember that matching headers must be installed.
 `trigger6.conf` sets `primary_userspace_nv12=1`, so the module uses the fast helper whenever it runs.
-Check the installed version with `modinfo -F version trigger6` (prints `1.0.0`).
+Check the installed version with `modinfo -F version trigger6` (prints `1.0.1`).
 
 ### C. Install the helper
 
@@ -359,7 +361,9 @@ Set one at load time with `modprobe trigger6 name=value`.
 * Offered modes: the built-in ones (1920x1080 @ 60/30, 1600x900, 1280x1024, 1280x800, 1280x720, 1024x768, 800x600,
   640x480) plus every other mode in the adapter's own mode table up to 1920x1200 and 60 Hz (on the captured adapter:
   1920x1080@50, 1360x768, 1366x768, 1440x900, 1680x1050, 1600x1200, 1920x1200 and more). The adapter is specified for
-  at most 60 Hz, so the 75 Hz entries in its table are not offered.
+  at most 60 Hz, so the 75 Hz entries in its table are not offered. With a readable EDID, modes larger than any mode
+  the monitor lists, or outside its refresh and pixel clock limits, are left out (item 28): on a 1080p monitor with a
+  48-100 Hz range that removes 1920x1200, 1600x1200 and 1920x1080@30.
 * HDMI audio is not implemented.
 * NV12 uses 4:2:0 colour, so tiny coloured text is slightly less sharp than RGB.
 * The reported FPS is the number of frames sent. It is not a camera or analyser measurement of visible frames.
@@ -373,6 +377,49 @@ Set one at load time with `modprobe trigger6 name=value`.
   udev/systemd integration is untested.
 
 ## Changelog
+
+### 1.0.1 (2026-11-05)
+
+Upgrading an existing DKMS install: run `dkms remove trigger6/1.0.0 --all`, then install `1.0.1` as in
+[section B](#b-permanent-install-with-dkms-debian-13--ubuntu--arch). Includes everything from `1.0.0` below.
+
+**Testing status, stated plainly:** builds without warnings (`W=1`) against Linux 6.18.59; not yet rebuilt on
+Debian 13 (6.12) or Arch Linux (7.2). Tested on the adapter with a Dell P2725HE under KDE Plasma (Wayland) on Gentoo,
+Linux 6.18.59. With 1.0.0 the monitor test confirmed checklist steps 1, 6 (with 1920x1080@50 instead of @30), 11, 12
+and 13: picture at 1920x1080@60, the helper taking over, 1280x720, 1920x1080@50, 1680x1050 and back,
+HDMI unplug/replug with the monitor back within about 0.1 s, every frame sent answered by a flip-done event
+(1417 of 1417), and 155 s without any frame and with `keepalive_ms=0` while the picture stayed. That test found
+items 27 and 28. The 1.0.1 build was then checked on the same setup: flip-done events counted on output 0, plug-in
+and HDMI unplug/replug counted as connection events, no `T6 event` log lines, one chip init per plug-in, and the
+mode list without 1920x1200, 1600x1200 and 1080p30.
+
+27. **Interrupt events decoded wrongly** (`t6_int_event`). Byte 19 was read as the flip command (3 = output 0,
+    4 = output 1), so every flip-done event was counted for output 1 and `head0 flips_done` stayed 0; the
+    "monitor connection changed" event was logged as unknown. The vendor driver's read handler (`T6InDisp.dll`,
+    0x1800f7d70) drops events without bit `0x04` in byte 0 and reads byte 19 as flags: `0x04` = frame displayed
+    (fence id at byte 12), `0x01`/`0x02` = monitor connection changed (it then re-reads the status of each output),
+    `0x10` = wake every output. *Fix:* the same decoding. Flip-done events count for output 0 (output 1 only when it
+    is the only active output); a connection change starts the status check at once instead of at the next 5 s poll
+    and is counted in the new `int_hotplug=` field of `t6_metrics`; the `0x20` event the adapter sends after start-up
+    and after every hotplug is dropped silently, as the vendor driver does; genuinely unknown events are logged with
+    all 64 bytes instead of 32.
+28. **Modes offered that the monitor cannot show** (`trigger6_connector.c`). The driver offered every mode the adapter
+    can program, so a 1080p monitor was offered 1920x1200 and 1600x1200. *Fix:* with a readable EDID, a mode is only
+    offered when the monitor lists a mode at least as large (established, standard or detailed timings of the EDID
+    base block) and its refresh rate and pixel clock lie within the monitor's range limits. Smaller modes stay,
+    because monitors scale them (1680x1050 worked on a 1080p monitor that does not list it). Without an EDID, or if
+    nothing would be left, the full list is offered as before. On monitors with a range starting above 30 Hz this
+    also removes 1920x1080@30.
+29. **Chip init ran twice at plug-in** (`t6_reprobe_work`). Without a monitor detected yet, probe initialises output 0
+    anyway; when the status poll then found the monitor, the whole init ran again 0.12 s later. *Fix:* the driver
+    records which outputs the last init programmed and skips the second init when the monitor appears on one of
+    them. An HDMI unplug clears that record, so a replugged monitor still gets a full init, as before.
+
+#### Not changed in 1.0.1
+
+* `keepalive_ms` stays at 2000. The adapter kept its picture without it on the tested monitor, but other monitors
+  have not been tried.
+* Output 1 is still modelled on this single-output adapter (about 31 MB and a status poll every 5 s).
 
 ### 1.0.0 (2026-11-04)
 
@@ -443,11 +490,13 @@ Each item below is backed by the USB capture of the vendor driver and/or static 
 * The second logical output is still allocated (about 31 MB) and polled every 5 s on single-output adapters. The
   USB ID does not say whether the board has one or two outputs, so this needs a probe-time capability check first.
 
-#### Hardware test checklist (0.9.0-r9 and 1.0.0 changes)
+#### Hardware test checklist (0.9.0-r9 to 1.0.1 changes)
 
 Result so far: fully working on Wayland; on Xorg, unplugging the USB adapter crashes the X server (see
-[Limitations](#limitations)). Step 10 (colours) is confirmed. Step 1 is confirmed without a monitor (30 table
-entries; one `T6 event` line of type `0x20` after start-up is expected). The steps that use `xrandr` are for Xorg; on Wayland, use the desktop's display
+[Limitations](#limitations)). Confirmed on the adapter: steps 1, 6 (1920x1080@50 instead of @30, which 1.0.1 does
+not offer on monitors that do not accept 30 Hz), 10, 11 (with 1.0.1: `head0 flips_done` follows `sent_frames` plus
+`keepalive_sent`), 12 (picture kept for 155 s without frames) and 13, plus HDMI unplug/replug of the monitor. Since 1.0.1 no `T6 event`
+lines are expected around start-up or hotplug; any that appear are genuinely unknown events. The steps that use `xrandr` are for Xorg; on Wayland, use the desktop's display
 settings (on KDE Plasma: `kscreen-doctor`) instead.
 
 1. Plug in with `primary_userspace_nv12=1`: desktop after login. `dmesg` shows `Output 0: device mode table has N
@@ -457,7 +506,7 @@ settings (on KDE Plasma: `kscreen-doctor`) instead.
 3. `xrandr --output <T6> --off` while the picture is changing, wait 10 s: the monitor stays in standby (item 3).
 4. Suspend and resume with the output on: no black or garbage flash every 1.5 s, hotplug still works (items 4, 9).
 5. Switch to 1280x720, then suspend/resume and unplug/replug the monitor: the mode stays correct (item 5).
-6. Switch between 1080p60 and 1080p30 (item 5).
+6. Switch between 1080p60 and 1080p30, or 1080p50 if the monitor does not accept 30 Hz (items 5, 28).
 7. Whenever `dmesg` shows `Halting T6 frame traffic`, the output must come back within about 60 s (item 1). There is
    no clean way to force such an error; de-authorising the device is a disconnect, not a transport fault.
 8. `systemctl --user stop trigger6-fast` on a static desktop returns at once (item 14).
@@ -598,6 +647,7 @@ original companion tools goes to the original author. The copyright notice
 * The user-space SIMD bridge (`trigger6_bridge.h`, `trigger6-fast`), the asynchronous two-URB USB path and the removal of per-frame copies.
 * `0.9.0-r9`: review fixes for fault recovery, probe error handling, output switch-off, suspend/resume, mode handling and the helper, plus corrected 1080p timing and colour data.
 * `1.0.0`: init and mode-set sequence, interrupt endpoint, the adapter's own mode table and sync encoding (see [Changelog](#changelog)).
+* `1.0.1`: interrupt events decoded as the vendor driver does (flip done, monitor hotplug), modes filtered by the monitor's EDID, and no second chip init at plug-in.
 * This work was done by the fork maintainer together with AI coding assistants (OpenAI Codex, then Anthropic Claude Code). Protocol facts also come from a static analysis of the vendor's Windows driver. No vendor code is included.
 
 These changes are **not** endorsed by or affiliated with the original author. Please report problems with this fork in this

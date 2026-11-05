@@ -45,14 +45,22 @@
 
 /* USB endpoints */
 #define T6_EP_BULK_OUT		0x02
-#define T6_EP_INT_IN		0x83	/* 64-byte event packets, one per flip */
+#define T6_EP_INT_IN		0x83	/* 64-byte device event packets */
 
 /*
- * Interrupt event packet (64 bytes). Seen under the vendor Windows driver:
- * one type-4 event per flip, u32 fence at byte 12, flip command at byte 19.
+ * Interrupt event packet (64 bytes), decoded as the vendor driver's read
+ * handler does (T6InDisp.dll 0x1800f7d70): events without bit 0x04 in byte 0
+ * are dropped, byte 19 holds flags, a flip-done event carries its u32 fence
+ * id at byte 12.
  */
 #define T6_INT_PACKET_SIZE	64
-#define T6_INT_EVT_FLIP_DONE	4
+#define T6_INT_EVT_VALID	0x04	/* byte 0 */
+#define T6_INT_FENCE_OFFSET	12
+#define T6_INT_FLAGS_OFFSET	19
+#define T6_INT_FLAG_STATUS_OUT0	0x01	/* monitor connection changed */
+#define T6_INT_FLAG_STATUS_OUT1	0x02
+#define T6_INT_FLAG_FLIP_DONE	0x04
+#define T6_INT_FLAG_WAKE	0x10	/* vendor driver wakes every output */
 
 /* USB control-message timeout (ms) — kept short to speed probe */
 #define T6_USB_CTRL_TIMEOUT_MS	1000
@@ -341,11 +349,14 @@ struct t6_device {
 	int int_interval;
 	bool int_running;
 	unsigned int int_consecutive_errors;
-	unsigned long int_last_recheck;	/* jiffies, rate-limits event rechecks */
 	bool probed;			/* probe finished: reprobe may run */
 	atomic64_t int_events;
+	atomic64_t int_hotplug;
 	atomic64_t int_unknown;
 	atomic64_t int_errors;
+
+	/* Heads programmed by the last successful chip init (io_lock). */
+	u8 init_mask;
 
 	/* Serialize frame staging and USB submission across both heads. */
 	struct delayed_work reprobe_work;

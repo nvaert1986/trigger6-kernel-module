@@ -627,7 +627,7 @@ static ssize_t t6_metrics_show(struct device *dev,
 	if (len >= PAGE_SIZE - 256)
 		return len;
 	len += sysfs_emit_at(buf, len,
-		"device bulk_calls=%lld bulk_chunks=%lld bulk_bytes=%lld bulk_errors=%lld bulk_short_writes=%lld tx_work_runs=%lld tx_work_empty=%lld tx_adapter_defers=%lld last_bulk_us=%llu max_bulk_us=%llu last_bulk_bytes=%zu int_running=%u int_events=%lld int_unknown=%lld int_errors=%lld\n",
+		"device bulk_calls=%lld bulk_chunks=%lld bulk_bytes=%lld bulk_errors=%lld bulk_short_writes=%lld tx_work_runs=%lld tx_work_empty=%lld tx_adapter_defers=%lld last_bulk_us=%llu max_bulk_us=%llu last_bulk_bytes=%zu int_running=%u int_events=%lld int_hotplug=%lld int_unknown=%lld int_errors=%lld\n",
 		(long long)atomic64_read(&t6->metrics.bulk_calls),
 		(long long)atomic64_read(&t6->metrics.bulk_chunks),
 		(long long)atomic64_read(&t6->metrics.bulk_bytes),
@@ -641,6 +641,7 @@ static ssize_t t6_metrics_show(struct device *dev,
 		READ_ONCE(t6->metrics.last_bulk_bytes),
 		READ_ONCE(t6->int_running),
 		(long long)atomic64_read(&t6->int_events),
+		(long long)atomic64_read(&t6->int_hotplug),
 		(long long)atomic64_read(&t6->int_unknown),
 		(long long)atomic64_read(&t6->int_errors));
 
@@ -1786,6 +1787,7 @@ static int t6_chip_init(struct t6_device *t6, bool read_tables)
 	if (!any_connected)
 		init_head[0] = true;
 
+	t6->init_mask = 0;
 	ret = t6_ctrl_out(t6, T6_REQ_SET_COLOR, 0, 0,
 			  t6_init_color, sizeof(t6_init_color));
 	if (ret < 0)
@@ -1851,6 +1853,9 @@ static int t6_chip_init(struct t6_device *t6, bool read_tables)
 			return ret;
 	}
 
+	for (idx = 0; idx < T6_OUTPUT_COUNT; idx++)
+		if (init_head[idx])
+			t6->init_mask |= BIT(idx);
 	return 0;
 }
 
@@ -2995,8 +3000,18 @@ static void t6_reprobe_work(struct work_struct *work)
 			continue;
 		}
 
-		if (!was_connected && head->connected)
+		/*
+		 * A monitor on an output the last chip init already
+		 * programmed needs no second init: without a monitor at probe,
+		 * output 0 is initialised anyway and head->width/height still
+		 * match what was programmed. An unplugged output loses that
+		 * state, so a replugged monitor gets a full init.
+		 */
+		if (!was_connected && head->connected &&
+		    !(t6->init_mask & BIT(idx)))
 			any_new_connection = true;
+		if (was_connected && !head->connected)
+			t6->init_mask &= ~BIT(idx);
 
 		if (was_connected != head->connected ||
 		    old_width != head->width ||
@@ -3692,11 +3707,13 @@ static const struct drm_driver t6_drm_driver = {
 /* ------------------------------------------------------------------
  * Interrupt endpoint (0x83)
  *
- * The vendor Windows driver keeps a read pending on this endpoint and gets
- * one 64-byte event per flip: u32 type 4, the frame's fence id at byte 12
- * and the flip command (3 = output 0, 4 = output 1) at byte 19. This driver
- * never read it before. Other event types have not been seen yet; they are
- * logged and trigger a status re-check, since hotplug is a likely candidate.
+ * The vendor Windows driver keeps a read pending on this endpoint. Its read
+ * handler drops events without bit 0x04 in byte 0 (the adapter also sends
+ * 0x20 events after start-up and hotplug) and tests the flags in byte 19 in
+ * this order: 0x04 = frame displayed (fence id at byte 12), 0x01/0x02 =
+ * monitor connection changed (it then re-reads status for each output),
+ * 0x10 = wake every output. Byte 19 is not the flip command: on a single
+ * output adapter every flip reports 0x04.
  * ------------------------------------------------------------------
  */
 
@@ -3704,31 +3721,45 @@ static const struct drm_driver t6_drm_driver = {
 
 static void t6_int_event(struct t6_device *t6, const u8 *buf, unsigned int len)
 {
-	atomic64_inc(&t6->int_events);
-	if (len >= 20 && le32_to_cpup((const __le32 *)buf) == T6_INT_EVT_FLIP_DONE &&
-	    (buf[19] == T6_CMD_FLIP_PRIMARY || buf[19] == T6_CMD_FLIP_SECONDARY)) {
-		struct t6_head *head = t6_get_head(t6,
-			buf[19] == T6_CMD_FLIP_PRIMARY ? 0 : 1);
+	u8 flags;
 
+	atomic64_inc(&t6->int_events);
+	if (len <= T6_INT_FLAGS_OFFSET || !(buf[0] & T6_INT_EVT_VALID))
+		return;
+	flags = buf[T6_INT_FLAGS_OFFSET];
+
+	if (flags & T6_INT_FLAG_FLIP_DONE) {
+		/*
+		 * The event names no output. Credit output 0 unless only
+		 * output 1 is scanning out.
+		 */
+		struct t6_head *head = t6_get_head(t6, 0);
+
+		if (!READ_ONCE(head->crtc_active) &&
+		    READ_ONCE(t6_get_head(t6, 1)->crtc_active))
+			head = t6_get_head(t6, 1);
 		WRITE_ONCE(head->last_done_fence,
-			   le32_to_cpup((const __le32 *)(buf + 12)));
+			   le32_to_cpup((const __le32 *)(buf + T6_INT_FENCE_OFFSET)));
 		atomic64_inc(&head->metrics.flips_done);
+		return;
+	}
+
+	if (flags & (T6_INT_FLAG_STATUS_OUT0 | T6_INT_FLAG_STATUS_OUT1)) {
+		atomic64_inc(&t6->int_hotplug);
+		/*
+		 * Re-check status now instead of at the next poll, but never
+		 * before probe has finished: reprobe_work registers misc
+		 * devices and updates connectors, which probe is still setting
+		 * up. Probe schedules its own check when it is done.
+		 */
+		if (READ_ONCE(t6->probed) && !drm_dev_is_unplugged(&t6->drm))
+			mod_delayed_work(system_wq, &t6->reprobe_work, 0);
 		return;
 	}
 
 	atomic64_inc(&t6->int_unknown);
 	dev_info_ratelimited(&t6->udev->dev, "T6 event (%u bytes): %*ph\n",
-			     len, (int)min(len, 32U), buf);
-	/*
-	 * Re-check status at most once a second, and never before probe has
-	 * finished: reprobe_work registers misc devices and updates
-	 * connectors, which probe is still setting up.
-	 */
-	if (READ_ONCE(t6->probed) && !drm_dev_is_unplugged(&t6->drm) &&
-	    time_after(jiffies, t6->int_last_recheck + HZ)) {
-		t6->int_last_recheck = jiffies;
-		mod_delayed_work(system_wq, &t6->reprobe_work, 0);
-	}
+			     len, (int)min(len, (unsigned int)T6_INT_PACKET_SIZE), buf);
 }
 
 static void t6_int_complete(struct urb *urb)
@@ -3859,7 +3890,6 @@ static int t6_usb_probe(struct usb_interface *intf,
 	t6_reset_device_metrics(t6);
 
 	/* DMA device for GEM */
-	t6->int_last_recheck = jiffies - HZ;
 	t6->dmadev = usb_intf_get_dma_device(intf);
 #ifdef T6_HAVE_DRM_SET_DMA_DEV
 	if (t6->dmadev)
@@ -4359,4 +4389,4 @@ MODULE_AUTHOR("Authentra / Ralph Friedman");
 MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_LICENSE("GPL");
 
-MODULE_VERSION("1.0.0");
+MODULE_VERSION("1.0.1");
