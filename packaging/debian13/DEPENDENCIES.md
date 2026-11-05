@@ -44,5 +44,5 @@ Zonder helper valt de driver terug op kernelconversie (~29 fps).
 
 ## 1.0.1 - aanvullende controles
 - Geen nieuwe dependencies.
-- Gecompileerd tegen 6.18.59 (Gentoo, `W=1`, zonder fouten of waarschuwingen). Nog niet opnieuw gecompileerd tegen Debian 13 (kernel 6.12) en Arch Linux (kernel 7.2).
+- Gecompileerd tegen 6.18.59 (Gentoo, `W=1`, zonder fouten of waarschuwingen). De wijzigingen gebruiken geen kernelinterfaces naast die van 1.0.0, dat compileert op Debian 13 (kernel 6.12) en Arch Linux (kernel 7.2).
 - Getest op de adapter met een Dell P2725HE onder KDE Plasma (Wayland), Gentoo met kernel 6.18.59: beeld, helper, moduswissels, HDMI-hotplug, flip-done-events en een volledige start-up per aansluiting. Zie de changelog in `README.md`.

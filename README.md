@@ -44,7 +44,7 @@ setup, with a stable USB connection.
 | 1.0.0 builds | Arch Linux kernel 7.2, Debian 13 kernel 6.12, Linux 6.18.59 (`W=1`, no warnings) |
 | 1.0.0 start-up test | Gentoo, Linux 6.18.59 with enforced module signatures: plug-in, chip init, mode table and unplug checked against a USB capture (no monitor attached yet) |
 | 1.0.0 and 1.0.1 monitor test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), Dell P2725HE: picture, helper, mode switches, HDMI hotplug, flip-done events and `keepalive_ms=0`, checked against `t6_metrics` and a USB capture |
-| 1.0.1 builds | Linux 6.18.59 (`W=1`, no warnings); not yet rebuilt on Debian 13 (6.12) and Arch Linux (7.2) |
+| 1.0.1 builds | Linux 6.18.59 (`W=1`, no warnings); uses no kernel interfaces beyond those 1.0.0 needs, which builds on Debian 13 (6.12) and Arch Linux (7.2) |
 
 Check your own adapter with:
 
@@ -383,8 +383,8 @@ Set one at load time with `modprobe trigger6 name=value`.
 Upgrading an existing DKMS install: run `dkms remove trigger6/1.0.0 --all`, then install `1.0.1` as in
 [section B](#b-permanent-install-with-dkms-debian-13--ubuntu--arch). Includes everything from `1.0.0` below.
 
-**Testing status, stated plainly:** builds without warnings (`W=1`) against Linux 6.18.59; not yet rebuilt on
-Debian 13 (6.12) or Arch Linux (7.2). Tested on the adapter with a Dell P2725HE under KDE Plasma (Wayland) on Gentoo,
+**Testing status, stated plainly:** builds without warnings (`W=1`) against Linux 6.18.59. The changes use no kernel
+interfaces beyond those 1.0.0 already needs, and 1.0.0 builds on Debian 13 (6.12) and Arch Linux (7.2). Tested on the adapter with a Dell P2725HE under KDE Plasma (Wayland) on Gentoo,
 Linux 6.18.59. With 1.0.0 the monitor test confirmed checklist steps 1, 6 (with 1920x1080@50 instead of @30), 11, 12
 and 13: picture at 1920x1080@60, the helper taking over, 1280x720, 1920x1080@50, 1680x1050 and back,
 HDMI unplug/replug with the monitor back within about 0.1 s, every frame sent answered by a flip-done event
