@@ -34,8 +34,10 @@
 #include <linux/usb.h>
 #include <linux/timer.h>
 #include <linux/poll.h>
+#include <linux/unaligned.h>
 
 #include <drm/drm_atomic_helper.h>
+#include <drm/drm_color_mgmt.h>
 #include <drm/drm_drv.h>
 #include <drm/drm_edid.h>
 #include <drm/drm_fourcc.h>
@@ -715,6 +717,8 @@ static const unsigned int t6_reprobe_delays_ms[] = {
 };
 
 static bool t6_edid_base_block_valid(const u8 *edid);
+static void t6_cursor_work(struct work_struct *work);
+static void t6_cursor_resend(struct t6_head *head);
 
 static void t6_schedule_reprobe(struct t6_device *t6);
 static void t6_trip_transport_fault(struct t6_device *t6,
@@ -911,6 +915,13 @@ static ssize_t t6_metrics_show(struct device *dev,
 			div64_u64(READ_ONCE(head->metrics.last_send_ns), 1000),
 			div64_u64(READ_ONCE(head->metrics.max_send_ns), 1000));
 		len += sysfs_emit_at(buf, len,
+			"head%u cursor_moves=%lld cursor_uploads=%lld cursor_cache_hits=%lld gamma_uploads=%lld\n",
+			head->output_idx,
+			(long long)atomic64_read(&head->cur_moves),
+			(long long)atomic64_read(&head->cur_uploads),
+			(long long)atomic64_read(&head->cur_hits),
+			(long long)atomic64_read(&head->gamma_uploads));
+		len += sysfs_emit_at(buf, len,
 			"head%u last_error=%d last_error_source=%s\n",
 			head->output_idx,
 			READ_ONCE(head->metrics.last_error),
@@ -919,7 +930,7 @@ static ssize_t t6_metrics_show(struct device *dev,
 	}
 
 	{
-		char line[160];
+		char line[256];
 
 		t6_audio_metrics(t6, line, sizeof(line));
 		len += sysfs_emit_at(buf, len, "%s\n", line);
@@ -1066,6 +1077,7 @@ static void t6_cancel_head_activity(struct t6_device *t6)
 		cancel_delayed_work_sync(&head->boot_keepalive_work);
 		cancel_delayed_work_sync(&head->tx_defer_work);
 		cancel_work_sync(&head->tx_work);
+		cancel_work_sync(&head->cur_work);
 		WRITE_ONCE(head->keepalive_due, false);
 	}
 }
@@ -1153,6 +1165,8 @@ static void t6_head_defaults(struct t6_device *t6,
 			     struct t6_head *head,
 			     u8 output_idx)
 {
+	unsigned int i;
+
 	memset(head, 0, sizeof(*head));
 	head->t6 = t6;
 	head->output_idx = output_idx;
@@ -1165,6 +1179,11 @@ static void t6_head_defaults(struct t6_device *t6,
 	INIT_DELAYED_WORK(&head->tx_defer_work, t6_frame_defer_work);
 	INIT_DELAYED_WORK(&head->boot_keepalive_work, t6_boot_keepalive_fn);
 	spin_lock_init(&head->edid_lock);
+	mutex_init(&head->cur_lock);
+	mutex_init(&head->cur_io_lock);
+	INIT_WORK(&head->cur_work, t6_cursor_work);
+	for (i = 0; i < 256; i++)
+		head->gamma[0][i] = head->gamma[1][i] = head->gamma[2][i] = i;
 	init_waitqueue_head(&head->fb_export_wq);
 	atomic_set(&head->fb_export_seq, 0);
 	t6_reset_head_metrics(head);
@@ -1213,10 +1232,45 @@ static void t6_parse_edid_monitor_name(struct t6_head *head)
 	}
 }
 
+/*
+ * Read the extension blocks the base block announces (for HDMI monitors the
+ * CEA-861 block: audio formats, HDMI/DVI, TV modes). Request 0x80 takes the
+ * byte offset in wValue, 128 bytes per block, as the vendor driver reads it.
+ * Blocks are kept up to the first one that fails to read, is empty or has a
+ * bad checksum, and the base block's count and checksum are corrected to
+ * match, so DRM never sees a block that was not read. Returns the length.
+ */
+static int t6_read_edid_ext(struct t6_device *t6, struct t6_head *head,
+			    u8 *edid)
+{
+	int want = min_t(int, edid[0x7e], T6_EDID_MAX_BLOCKS - 1);
+	int n, ret;
+
+	for (n = 0; n < want; n++) {
+		u8 *blk = edid + (n + 1) * EDID_LENGTH;
+
+		ret = t6_ctrl_in(t6, T6_REQ_GET_EDID, (n + 1) * EDID_LENGTH,
+				 head->output_idx, blk, EDID_LENGTH);
+		if (ret < EDID_LENGTH || !blk[0] ||
+		    !t6_edid_base_block_valid(blk)) {
+			dev_warn(&t6->udev->dev,
+				 "Head %u: EDID extension block %d unusable (%d); using %d block(s)\n",
+				 head->output_idx, n + 1, ret, n + 1);
+			break;
+		}
+	}
+	if (edid[0x7e] != n) {
+		edid[0x7f] += edid[0x7e] - n;
+		edid[0x7e] = n;
+	}
+	return (n + 1) * EDID_LENGTH;
+}
+
 static int t6_probe_head(struct t6_device *t6, struct t6_head *head)
 {
 	u8 status = 0;
-	u8 edid[EDID_LENGTH];
+	u8 *edid;
+	int edid_len = 0;
 	int preferred_width = T6_SCANOUT_WIDTH;
 	int preferred_height = T6_SCANOUT_HEIGHT;
 	bool was_connected = READ_ONCE(head->connected);
@@ -1238,22 +1292,29 @@ static int t6_probe_head(struct t6_device *t6, struct t6_head *head)
 		return 0;
 
 	/* Read into a local buffer: get_modes may be reading edid_data. */
+	edid = kmalloc(T6_EDID_MAX_BLOCKS * EDID_LENGTH, GFP_KERNEL);
+	if (!edid)
+		return -ENOMEM;
 	ret = t6_ctrl_in(t6, T6_REQ_GET_EDID, 0, head->output_idx,
 			 edid, EDID_LENGTH);
+	if (ret >= EDID_LENGTH && t6_edid_base_block_valid(edid))
+		edid_len = t6_read_edid_ext(t6, head, edid);
 	/*
 	 * A different monitor (or the first one) must not inherit the
 	 * previous monitor's timing; the same monitor replugged keeps it.
-	 * Only this worker writes edid_data, so it can be read unlocked here.
+	 * The base block identifies the monitor; its last two bytes may
+	 * change when an extension block fails to read. Only this worker
+	 * writes edid_data, so it can be read unlocked here.
 	 */
-	if (ret >= EDID_LENGTH && t6_edid_base_block_valid(edid))
+	if (edid_len)
 		head->edid_new = head->edid_len < EDID_LENGTH ||
-				 memcmp(head->edid_data, edid, EDID_LENGTH);
+				 memcmp(head->edid_data, edid, 0x7e);
 	else
 		head->edid_new = head->edid_len >= EDID_LENGTH;
 	spin_lock(&head->edid_lock);
-	if (ret >= EDID_LENGTH && t6_edid_base_block_valid(edid)) {
-		memcpy(head->edid_data, edid, EDID_LENGTH);
-		head->edid_len = EDID_LENGTH;
+	if (edid_len) {
+		memcpy(head->edid_data, edid, edid_len);
+		head->edid_len = edid_len;
 	} else {
 		head->edid_len = 0;
 		head->edid_timing_count = 0;
@@ -1269,10 +1330,11 @@ static int t6_probe_head(struct t6_device *t6, struct t6_head *head)
 		t6_parse_edid_monitor_name(head);
 		t6_build_edid_timings(head, edid);
 		dev_info(&t6->udev->dev,
-			 "Head %u: monitor prefers %dx%d; %u EDID timing(s) usable on this adapter%s\n",
+			 "Head %u: monitor prefers %dx%d; %u EDID timing(s) usable on this adapter%s; %d EDID extension block(s)\n",
 			 head->output_idx, preferred_width, preferred_height,
 			 head->edid_timing_count,
-			 head->edid_timing_pref ? ", including the preferred one" : "");
+			 head->edid_timing_pref ? ", including the preferred one" : "",
+			 edid_len / EDID_LENGTH - 1);
 	} else if (ret >= 128) {
 		dev_warn(&t6->udev->dev,
 			 "Head %u returned an EDID block with invalid checksum; using fixed %dx%d mode assumptions\n",
@@ -1280,6 +1342,7 @@ static int t6_probe_head(struct t6_device *t6, struct t6_head *head)
 			 T6_SCANOUT_WIDTH,
 			 T6_SCANOUT_HEIGHT);
 	}
+	kfree(edid);
 
 	/* Polling EDID must preserve the active hardware scanout mode.
 	 * Initial dimensions are set by t6_head_defaults().
@@ -1922,6 +1985,12 @@ static void t6_read_device_info(struct t6_device *t6)
 	t6->output_count = T6_OUTPUT_COUNT;
 	if (!info)
 		return;
+	/* The feature level, as the vendor driver reads it (mct-linux). */
+	ret = t6_ctrl_in(t6, T6_REQ_PLATFORM_INFO, 0, 4, info, 4);
+	t6->feature_level = ret == 4 ? get_unaligned_le32(info) : -1;
+	t6->has_gamma = t6->feature_level >= T6_GAMMA_MIN_LEVEL;
+	dev_info(&t6->udev->dev, "Feature level %d%s\n", t6->feature_level,
+		 t6->has_gamma ? "" : ": no gamma tables");
 	ret = t6_ctrl_in(t6, T6_REQ_GET_DEVICE_INFO, 0, 0, info,
 			 T6_DEVICE_INFO_SIZE);
 	if (ret < T6_DEVICE_INFO_SIZE || memcmp(info, "DISP", 4)) {
@@ -2005,32 +2074,42 @@ static void t6_read_mode_table(struct t6_device *t6, struct t6_head *head)
 		 head->output_idx, i);
 }
 
-/* Identity gamma for one output, as the vendor driver uploads it. */
-static int t6_load_identity_lut(struct t6_device *t6, struct t6_head *head)
+/*
+ * The output's gamma tables (identity unless the desktop set a GAMMA_LUT),
+ * uploaded as the vendor driver does at init and whenever Windows changes
+ * the gamma ramp: one 256-byte table per channel (0x1D, in the order the
+ * vendor sends them: blue, green, red), then enable (0x1C with bit 1). For
+ * Windows' default ramp the vendor driver switches the tables off instead;
+ * an identity upload gives the same picture. io_lock held.
+ */
+static int t6_load_lut(struct t6_device *t6, struct t6_head *head)
 {
-	static const u16 channels[] = { 0x100, 0x200, 0x400 };
+	/* indexed like head->gamma: R, G, B */
+	static const u16 channels[] = {
+		T6_LUT_CH_RED, T6_LUT_CH_GREEN, T6_LUT_CH_BLUE
+	};
 	u16 out = head->output_idx << 8;
-	u8 lut[256];
 	unsigned int i;
 	int ret;
 
-	for (i = 0; i < sizeof(lut); i++)
-		lut[i] = i;
-	for (i = 0; i < ARRAY_SIZE(channels); i++) {
+	for (i = ARRAY_SIZE(channels); i-- > 0;) {
 		ret = t6_ctrl_out(t6, T6_REQ_LUT_WRITE, out, channels[i],
-				  lut, sizeof(lut));
+				  head->gamma[i], sizeof(head->gamma[i]));
 		if (ret < 0)
 			return ret;
 	}
-	return t6_ctrl_out(t6, T6_REQ_LUT_CTRL, out | T6_LUT_OP_COMMIT, 0,
-			   NULL, 0);
+	ret = t6_ctrl_out(t6, T6_REQ_LUT_CTRL, out | T6_LUT_OP_COMMIT, 0,
+			  NULL, 0);
+	if (ret >= 0)
+		atomic64_inc(&head->gamma_uploads);
+	return ret;
 }
 
 /*
  * Chip init in the order the vendor Windows driver uses (USB capture of a
  * 0711:5601, frames 120-258): audio volume, LUT reset for both outputs, one
  * all-zero 0x31, [mode tables], then per output SET_RESOLUTION and enable,
- * audio off, and an identity gamma upload with commit. The old sequence sent
+ * audio off, and the gamma upload with commit. The old sequence sent
  * the volume after the resets, 0x31 per output, wrapped everything in two 0x24
  * requests (HDMI audio off, then *on* without audio data) and committed the
  * LUT of output 0 without uploading one.
@@ -2122,7 +2201,7 @@ static int t6_chip_init(struct t6_device *t6, bool read_tables)
 	if (ret < 0)
 		return ret;
 	/* Both pipes of the chip, also on single-output adapters (tested). */
-	for (idx = 0; idx < T6_OUTPUT_COUNT; idx++) {
+	for (idx = 0; t6->has_gamma && idx < T6_OUTPUT_COUNT; idx++) {
 		ret = t6_ctrl_out(t6, T6_REQ_LUT_CTRL,
 				  (idx << 8) | T6_LUT_OP_RESET, 0, NULL, 0);
 		if (ret < 0)
@@ -2189,17 +2268,19 @@ static int t6_chip_init(struct t6_device *t6, bool read_tables)
 		return ret;
 	t6_audio_engine_lost(t6);
 
-	for (idx = 0; idx < t6->output_count; idx++) {
+	for (idx = 0; t6->has_gamma && idx < t6->output_count; idx++) {
 		if (!init_head[idx])
 			continue;
-		ret = t6_load_identity_lut(t6, t6_get_head(t6, idx));
+		ret = t6_load_lut(t6, t6_get_head(t6, idx));
 		if (ret < 0)
 			return ret;
 	}
 
 	for (idx = 0; idx < t6->output_count; idx++)
-		if (init_head[idx])
+		if (init_head[idx]) {
 			t6->init_mask |= BIT(idx);
+			t6_cursor_resend(t6_get_head(t6, idx));
+		}
 	return 0;
 }
 
@@ -3191,8 +3272,10 @@ static void t6_resend_work(struct work_struct *work)
 	for (idx = 0; idx < t6->output_count; idx++) {
 		struct t6_head *head = t6_get_head(t6, idx);
 
-		if (READ_ONCE(head->crtc_active))
+		if (READ_ONCE(head->crtc_active)) {
 			t6_resend_last_frame(head);
+			t6_cursor_resend(head);
+		}
 	}
 	drm_dev_exit(enter_idx);
 }
@@ -3749,6 +3832,11 @@ static void t6_crtc_atomic_enable(struct drm_crtc *crtc,
 				 head->output_idx, ret);
 	}
 	mutex_unlock(&t6->io_lock);
+	/*
+	 * Upload the cursor again after a mode set, as mct-linux does; inside
+	 * drm_dev_enter, so nothing is queued after unplug cancelled the work.
+	 */
+	t6_cursor_resend(head);
 	drm_dev_exit(idx);
 }
 
@@ -3826,7 +3914,49 @@ static int t6_crtc_atomic_check(struct drm_crtc *crtc,
 	if (!crtc_state)
 		return 0;
 	crtc_state->no_vblank = true;
+	if (crtc_state->gamma_lut &&
+	    drm_color_lut_size(crtc_state->gamma_lut) != 256)
+		return -EINVAL;
 	return 0;
+}
+
+/*
+ * A new GAMMA_LUT (or the legacy gamma ioctl, which DRM turns into one):
+ * keep it as 8-bit tables for chip init and upload it now if the output
+ * is on. No LUT means identity.
+ */
+static void t6_crtc_atomic_flush(struct drm_crtc *crtc,
+				 struct t6_atomic_state *state)
+{
+	struct t6_head *head = t6_head_from_crtc(crtc);
+	struct drm_crtc_state *crtc_state =
+		drm_atomic_get_new_crtc_state(state, crtc);
+	struct t6_device *t6 = head->t6;
+	const struct drm_color_lut *lut = NULL;
+	unsigned int i;
+	int idx, ret;
+
+	if (!crtc_state || !crtc_state->color_mgmt_changed || !t6->has_gamma)
+		return;
+	if (crtc_state->gamma_lut)
+		lut = crtc_state->gamma_lut->data;
+
+	mutex_lock(&t6->io_lock);
+	for (i = 0; i < 256; i++) {
+		head->gamma[0][i] = lut ? drm_color_lut_extract(lut[i].red, 8) : i;
+		head->gamma[1][i] = lut ? drm_color_lut_extract(lut[i].green, 8) : i;
+		head->gamma[2][i] = lut ? drm_color_lut_extract(lut[i].blue, 8) : i;
+	}
+	if (crtc_state->active && t6_head_runtime_connected(head) &&
+	    !READ_ONCE(t6->io_faulted) && drm_dev_enter(&t6->drm, &idx)) {
+		ret = t6_load_lut(t6, head);
+		if (ret < 0)
+			dev_warn(&t6->udev->dev,
+				 "Output %u: gamma upload failed: %d\n",
+				 head->output_idx, ret);
+		drm_dev_exit(idx);
+	}
+	mutex_unlock(&t6->io_lock);
 }
 
 static int t6_plane_atomic_check(struct drm_plane *plane,
@@ -4025,6 +4155,7 @@ static const struct drm_crtc_helper_funcs t6_crtc_helper_funcs = {
 	.atomic_enable = t6_crtc_atomic_enable,
 	.atomic_disable = t6_crtc_atomic_disable,
 	.atomic_check = t6_crtc_atomic_check,
+	.atomic_flush = t6_crtc_atomic_flush,
 };
 
 static const struct drm_crtc_funcs t6_crtc_funcs = {
@@ -4048,6 +4179,278 @@ static const struct drm_plane_funcs t6_plane_funcs = {
 	.destroy = drm_plane_cleanup,
 	DRM_GEM_SHADOW_PLANE_FUNCS,
 };
+
+/* ------------------------------------------------------------------
+ * Hardware cursor plane
+ * ------------------------------------------------------------------
+ *
+ * As the vendor driver and mct-linux do it: the image goes into one of the
+ * output's five slots (requests 0x10/0x11, 4 KiB pieces, wIndex = byte
+ * offset), then the show request selects that slot; moves are one position
+ * request each, so moving the mouse sends no frame. A new image goes into a
+ * slot that is not on screen (overwriting the visible slot left the cursor
+ * scrambled, mct-linux), and a shape seen before (arrow, text beam, hand)
+ * is shown again by selecting its slot. The commit only stores the cursor;
+ * cur_work does the USB part, on the control endpoint, so a move does not
+ * wait behind a frame on the bulk pipe.
+ */
+
+static int t6_cursor_slot(struct t6_head *head, int i)
+{
+	return head->output_idx * T6_CUR_SLOTS + i;
+}
+
+/* cur_io_lock held */
+static int t6_cursor_show(struct t6_head *head, bool show)
+{
+	int ret;
+
+	if (head->cur_visible == show)
+		return 0;
+	ret = t6_ctrl_out(head->t6, T6_REQ_CUR_SHOW(head->output_idx),
+			  t6_cursor_slot(head, head->cur_slot), show, NULL, 0);
+	if (ret < 0)
+		return ret;
+	head->cur_visible = show;
+	return 0;
+}
+
+/* Select slot i and show the cursor. cur_io_lock held. */
+static int t6_cursor_select(struct t6_head *head, int i)
+{
+	int ret = t6_ctrl_out(head->t6, T6_REQ_CUR_SHOW(head->output_idx),
+			      t6_cursor_slot(head, i), 1, NULL, 0);
+
+	if (ret < 0)
+		return ret;
+	head->cur_slot = i;
+	head->cur_used[i] = ++head->cur_tick;
+	head->cur_visible = true;
+	return 0;
+}
+
+/*
+ * Show cur_send: select the slot that already holds it, or upload it into
+ * the least recently used slot other than the one on screen and select
+ * that. cur_io_lock held.
+ */
+static int t6_cursor_image(struct t6_head *head)
+{
+	int i, lru = -1, off, n, ret = 0;
+
+	for (i = 0; i < T6_CUR_SLOTS; i++) {
+		if (head->cur_cached[i] &&
+		    !memcmp(head->cur_cache[i], head->cur_send, T6_CUR_BYTES)) {
+			if (i == head->cur_slot && head->cur_visible)
+				return 0;
+			atomic64_inc(&head->cur_hits);
+			return t6_cursor_select(head, i);
+		}
+		if (i != head->cur_slot &&
+		    (lru < 0 || head->cur_used[i] < head->cur_used[lru]))
+			lru = i;
+	}
+	head->cur_cached[lru] = false;	/* overwritten from here on */
+	for (off = 0; off < T6_CUR_BYTES && ret >= 0; off += n) {
+		n = min(T6_CUR_BYTES - off, T6_CUR_CHUNK);
+		ret = t6_ctrl_out(head->t6, T6_REQ_CUR_IMG(head->output_idx),
+				  t6_cursor_slot(head, lru), off,
+				  head->cur_send + off, n);
+	}
+	if (ret < 0)
+		return ret;
+	memcpy(head->cur_cache[lru], head->cur_send, T6_CUR_BYTES);
+	head->cur_cached[lru] = true;
+	atomic64_inc(&head->cur_uploads);
+	return t6_cursor_select(head, lru);
+}
+
+/*
+ * Top left of the image; negative values are sent as v - 1, as the vendor
+ * driver does. cur_io_lock held.
+ */
+static int t6_cursor_move(struct t6_head *head, int x, int y)
+{
+	int ret = t6_ctrl_out(head->t6, T6_REQ_CUR_POS(head->output_idx),
+			      x < 0 ? (x - 1) & 0xffff : x,
+			      y < 0 ? (y - 1) & 0xffff : y, NULL, 0);
+
+	if (ret < 0)
+		return ret;
+	atomic64_inc(&head->cur_moves);
+	return 0;
+}
+
+/* Send the last committed cursor state. */
+static void t6_cursor_work(struct work_struct *work)
+{
+	struct t6_head *head = container_of(work, struct t6_head, cur_work);
+	struct t6_device *t6 = head->t6;
+	bool on;
+	int x, y, idx, ret;
+
+	mutex_lock(&head->cur_io_lock);
+	mutex_lock(&head->cur_lock);
+	if (!head->cur_pending) {
+		mutex_unlock(&head->cur_lock);
+		goto out;
+	}
+	head->cur_pending = false;
+	on = head->cur_on;
+	x = head->cur_x;
+	y = head->cur_y;
+	if (on)
+		memcpy(head->cur_send, head->cur_img, T6_CUR_BYTES);
+	if (head->cur_lost) {
+		/* the chip may have lost its slots: upload again */
+		memset(head->cur_cached, 0, sizeof(head->cur_cached));
+		head->cur_visible = false;
+		head->cur_lost = false;
+		head->cur_errors = 0;
+	}
+	mutex_unlock(&head->cur_lock);
+
+	/*
+	 * An output that is off or faulted gets nothing; enable resends.
+	 * After failed requests stop until the next re-init: t6_ctrl_out
+	 * resets the device after a few control errors in a row, and a
+	 * cursor moved at 60 Hz would get there at once.
+	 */
+	if (!READ_ONCE(head->crtc_active) || READ_ONCE(t6->io_faulted) ||
+	    !t6_head_runtime_connected(head) ||
+	    head->cur_errors >= T6_CUR_MAX_ERRORS ||
+	    !drm_dev_enter(&t6->drm, &idx))
+		goto out;
+	if (!on) {
+		ret = t6_cursor_show(head, false);
+	} else {
+		ret = t6_cursor_move(head, x, y);
+		if (!ret)
+			ret = t6_cursor_image(head);
+	}
+	if (ret < 0 && ++head->cur_errors >= T6_CUR_MAX_ERRORS)
+		dev_warn(&t6->udev->dev,
+			 "Output %u: hardware cursor requests fail (%d); cursor stopped until the next re-init\n",
+			 head->output_idx, ret);
+	else if (!ret)
+		head->cur_errors = 0;
+	drm_dev_exit(idx);
+out:
+	mutex_unlock(&head->cur_io_lock);
+}
+
+/* Chip init, mode set or event 0x10: send the cursor again. */
+static void t6_cursor_resend(struct t6_head *head)
+{
+	if (!head->cur_img)
+		return;
+	mutex_lock(&head->cur_lock);
+	head->cur_lost = true;
+	head->cur_pending = true;
+	mutex_unlock(&head->cur_lock);
+	queue_work(system_highpri_wq, &head->cur_work);
+}
+
+static int t6_cursor_alloc(struct t6_device *t6, struct t6_head *head)
+{
+	unsigned int i;
+
+	head->cur_img = drmm_kzalloc(&t6->drm, T6_CUR_BYTES, GFP_KERNEL);
+	head->cur_send = drmm_kzalloc(&t6->drm, T6_CUR_BYTES, GFP_KERNEL);
+	if (!head->cur_img || !head->cur_send)
+		return -ENOMEM;
+	for (i = 0; i < T6_CUR_SLOTS; i++) {
+		head->cur_cache[i] = drmm_kzalloc(&t6->drm, T6_CUR_BYTES,
+						  GFP_KERNEL);
+		if (!head->cur_cache[i])
+			return -ENOMEM;
+	}
+	/* header {kind 1 = ARGB with alpha, width, height, pitch} */
+	put_unaligned_le16(1, head->cur_img);
+	put_unaligned_le16(T6_CUR_SIZE, head->cur_img + 2);
+	put_unaligned_le16(T6_CUR_SIZE, head->cur_img + 4);
+	put_unaligned_le16(T6_CUR_SIZE * 4, head->cur_img + 6);
+	return 0;
+}
+
+static int t6_cursor_atomic_check(struct drm_plane *plane,
+				  struct t6_atomic_state *state)
+{
+	struct drm_plane_state *new_state =
+		drm_atomic_get_new_plane_state(state, plane);
+	struct drm_crtc_state *crtc_state = NULL;
+	struct drm_framebuffer *fb;
+
+	if (!new_state)
+		return 0;
+	fb = new_state->fb;
+	if (new_state->crtc)
+		crtc_state = drm_atomic_get_new_crtc_state(state,
+							   new_state->crtc);
+	/* the image is taken from the framebuffer's top left */
+	if (fb && (fb->width > T6_CUR_SIZE || fb->height > T6_CUR_SIZE ||
+		   new_state->src_x || new_state->src_y))
+		return -EINVAL;
+	return drm_atomic_helper_check_plane_state(new_state, crtc_state,
+						   DRM_PLANE_NO_SCALING,
+						   DRM_PLANE_NO_SCALING,
+						   true, true);
+}
+
+static void t6_cursor_atomic_update(struct drm_plane *plane,
+				    struct t6_atomic_state *state)
+{
+	struct t6_head *head = t6_head_from_cursor(plane);
+	struct drm_plane_state *new_state =
+		drm_atomic_get_new_plane_state(state, plane);
+	struct drm_shadow_plane_state *shadow;
+	struct drm_framebuffer *fb;
+	bool on;
+	int y, w, h, idx;
+
+	if (!new_state || !head->cur_img)
+		return;
+	/* nothing may be queued once the device is unplugged */
+	if (!drm_dev_enter(plane->dev, &idx))
+		return;
+	shadow = to_drm_shadow_plane_state(new_state);
+	fb = new_state->fb;
+	on = fb && new_state->visible;
+
+	/* only store it: t6_cursor_work does the USB part */
+	if (on && drm_gem_fb_begin_cpu_access(fb, DMA_FROM_DEVICE))
+		goto out;
+	mutex_lock(&head->cur_lock);
+	if (on) {
+		u8 *dst = head->cur_img + 8;
+
+		memset(dst, 0, T6_CUR_BYTES - 8);
+		w = min_t(int, fb->width, T6_CUR_SIZE) * 4;
+		h = min_t(int, fb->height, T6_CUR_SIZE);
+		for (y = 0; y < h; y++)
+			iosys_map_memcpy_from(dst + y * T6_CUR_SIZE * 4,
+					      &shadow->data[0],
+					      y * fb->pitches[0], w);
+		head->cur_x = new_state->crtc_x;
+		head->cur_y = new_state->crtc_y;
+	}
+	head->cur_on = on;
+	head->cur_pending = true;
+	mutex_unlock(&head->cur_lock);
+	if (on)
+		drm_gem_fb_end_cpu_access(fb, DMA_FROM_DEVICE);
+	queue_work(system_highpri_wq, &head->cur_work);
+out:
+	drm_dev_exit(idx);
+}
+
+static const struct drm_plane_helper_funcs t6_cursor_helper_funcs = {
+	DRM_GEM_SHADOW_PLANE_HELPER_FUNCS,
+	.atomic_check = t6_cursor_atomic_check,
+	.atomic_update = t6_cursor_atomic_update,
+};
+
+static const u32 t6_cursor_formats[] = { DRM_FORMAT_ARGB8888 };
 
 static const struct drm_encoder_funcs t6_encoder_funcs = {
 	.destroy = drm_encoder_cleanup,
@@ -4488,11 +4891,18 @@ static int t6_usb_probe(struct usb_interface *intf,
 	drm->mode_config.funcs = &t6_mode_config_funcs;
 	drm->mode_config.helper_private = &t6_mode_config_helper_funcs;
 
-	drm->mode_config.min_width = 640;
-	drm->mode_config.min_height = 480;
+	/*
+	 * Only framebuffers are checked against the minimum (the modes come
+	 * from the adapter's table): 640x480 rejected the compositor's 64x64
+	 * cursor buffers ("Failed to create a framebuffer: Invalid argument").
+	 */
+	drm->mode_config.min_width = 0;
+	drm->mode_config.min_height = 0;
 	drm->mode_config.max_width = T6_MAX_WIDTH;
 	drm->mode_config.max_height = T6_MAX_HEIGHT;
 	drm->mode_config.preferred_depth = 32;
+	drm->mode_config.cursor_width = T6_CUR_SIZE;
+	drm->mode_config.cursor_height = T6_CUR_SIZE;
 
 	for (head_idx = 0; head_idx < t6->output_count; head_idx++) {
 		struct t6_head *head = t6_get_head(t6, head_idx);
@@ -4515,18 +4925,43 @@ static int t6_usb_probe(struct usb_interface *intf,
 		drm_plane_helper_add(&head->primary_plane,
 				     &t6_plane_helper_funcs);
 
+		/* Cursor plane */
+		ret = t6_cursor_alloc(t6, head);
+		if (ret)
+			goto err_buffers;
+		ret = drm_universal_plane_init(drm, &head->cursor_plane,
+					       0, &t6_plane_funcs,
+					       t6_cursor_formats,
+					       ARRAY_SIZE(t6_cursor_formats),
+					       NULL,
+					       DRM_PLANE_TYPE_CURSOR,
+					       "t6-cursor-%u",
+					       head->output_idx);
+		if (ret)
+			goto err_buffers;
+		drm_plane_helper_add(&head->cursor_plane,
+				     &t6_cursor_helper_funcs);
+
 		/* CRTC */
 		ret = drm_crtc_init_with_planes(drm, &head->crtc,
 						&head->primary_plane,
-						NULL, &t6_crtc_funcs,
+						&head->cursor_plane, &t6_crtc_funcs,
 						"t6-crtc-%u",
 						head->output_idx);
 		if (ret)
 			goto err_buffers;
 		drm_crtc_helper_add(&head->crtc, &t6_crtc_helper_funcs);
+		/* 256-entry gamma LUT, uploaded to the chip (t6_load_lut) */
+		if (t6->has_gamma) {
+			drm_crtc_enable_color_mgmt(&head->crtc, 0, false, 256);
+			ret = drm_mode_crtc_set_gamma_size(&head->crtc, 256);
+			if (ret)
+				goto err_buffers;
+		}
 
 		/* Set plane's possible_crtcs now that CRTC is initialized */
 		head->primary_plane.possible_crtcs = drm_crtc_mask(&head->crtc);
+		head->cursor_plane.possible_crtcs = drm_crtc_mask(&head->crtc);
 
 		/* Encoder */
 		ret = drm_encoder_init(drm, &head->encoder,
@@ -4802,4 +5237,4 @@ MODULE_AUTHOR("Authentra / Ralph Friedman");
 MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_LICENSE("GPL");
 
-MODULE_VERSION("1.1.0-beta2");
+MODULE_VERSION("1.1.0-beta3");

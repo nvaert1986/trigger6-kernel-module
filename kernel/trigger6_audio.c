@@ -34,6 +34,7 @@
 #include <sound/tlv.h>
 
 #include <drm/drm_drv.h>
+#include <drm/drm_eld.h>
 
 #include "trigger6.h"
 
@@ -89,6 +90,10 @@ struct t6_audio {
 	bool has_vol;
 	bool unmuted;			/* the switch: off sends the minimum */
 	int vol_min, vol_max, vol[2];
+	/* the monitor's audio, from its EDID; under lock */
+	u8 eld[MAX_ELD_BYTES];
+	int eld_size;			/* 0: no monitor or no audio */
+	struct snd_kcontrol *eld_kctl, *jack_kctl;
 };
 
 /*
@@ -524,8 +529,10 @@ static const struct snd_kcontrol_new t6_switch_ctl = {
 
 /*
  * The volume node's range, then full volume, as Windows and macOS set when
- * the adapter appears: it powers up low (2 of 31 on the tested adapter),
- * which is barely audible. The desktop's volume control works on top of it.
+ * the adapter appears. Chip init already sends Windows' own volume request
+ * (t6_init_volume; read back as 31 of 31 on the tested adapter); this sends
+ * it again from the range the adapter reports. The desktop's volume control
+ * works on top of it.
  * Only a plain volume node (type 0) from 0 is used, so the dB scale is right.
  */
 static void t6_audio_read_volume(struct t6_audio *aud)
@@ -553,6 +560,94 @@ static void t6_audio_read_volume(struct t6_audio *aud)
 out:
 	mutex_unlock(&t6->io_lock);
 }
+
+/*
+ * The monitor's audio capabilities for userspace, as mct-linux offers them:
+ * an "ELD" control (what HDMI sound drivers provide; the monitor's name and
+ * audio formats) and a jack control, plugged while a monitor with an EDID
+ * is connected to output 0. DRM builds an ELD for every such monitor, also
+ * one without speakers, so this is "monitor present", as HDMI sound drivers
+ * report their jack. The vendor's Windows driver takes its jack from the
+ * firmware instead (interrupt event 0x20, bits 24-26 of the u32 at 0x20),
+ * but the tested adapter sent that bit set with no monitor connected at
+ * all, so it is not used here. Kept from the last EDID that DRM parsed
+ * (t6_connector_get_modes), cleared on disconnect (t6_connector_detect).
+ * Caller holds mode_config.mutex, which also orders it against init/fini.
+ */
+void t6_audio_eld(struct t6_device *t6, const struct drm_connector *connector,
+		  bool connected)
+{
+	struct t6_audio *aud = t6->audio;
+	unsigned long flags;
+	int size = connected ? drm_eld_size(connector->eld) : 0;
+	bool changed;
+
+	if (!aud)
+		return;
+	if (size > MAX_ELD_BYTES || size <= DRM_ELD_HEADER_BLOCK_SIZE)
+		size = 0;
+	spin_lock_irqsave(&aud->lock, flags);
+	changed = size != aud->eld_size ||
+		  (size && memcmp(aud->eld, connector->eld, size));
+	if (size)
+		memcpy(aud->eld, connector->eld, size);
+	aud->eld_size = size;
+	spin_unlock_irqrestore(&aud->lock, flags);
+	if (!changed)
+		return;
+	snd_ctl_notify(aud->card, SNDRV_CTL_EVENT_MASK_VALUE | SNDRV_CTL_EVENT_MASK_INFO,
+		       &aud->eld_kctl->id);
+	snd_ctl_notify(aud->card, SNDRV_CTL_EVENT_MASK_VALUE, &aud->jack_kctl->id);
+}
+
+static int t6_eld_info(struct snd_kcontrol *kc, struct snd_ctl_elem_info *info)
+{
+	struct t6_audio *aud = snd_kcontrol_chip(kc);
+	unsigned long flags;
+
+	info->type = SNDRV_CTL_ELEM_TYPE_BYTES;
+	spin_lock_irqsave(&aud->lock, flags);
+	info->count = aud->eld_size;
+	spin_unlock_irqrestore(&aud->lock, flags);
+	return 0;
+}
+
+static int t6_eld_get(struct snd_kcontrol *kc, struct snd_ctl_elem_value *v)
+{
+	struct t6_audio *aud = snd_kcontrol_chip(kc);
+	unsigned long flags;
+
+	memset(v->value.bytes.data, 0, sizeof(v->value.bytes.data));
+	spin_lock_irqsave(&aud->lock, flags);
+	memcpy(v->value.bytes.data, aud->eld,
+	       min_t(int, aud->eld_size, sizeof(v->value.bytes.data)));
+	spin_unlock_irqrestore(&aud->lock, flags);
+	return 0;
+}
+
+static int t6_jack_get(struct snd_kcontrol *kc, struct snd_ctl_elem_value *v)
+{
+	struct t6_audio *aud = snd_kcontrol_chip(kc);
+
+	v->value.integer.value[0] = READ_ONCE(aud->eld_size) > 0;
+	return 0;
+}
+
+static const struct snd_kcontrol_new t6_eld_ctl = {
+	.iface = SNDRV_CTL_ELEM_IFACE_PCM,
+	.name = "ELD",
+	.access = SNDRV_CTL_ELEM_ACCESS_READ | SNDRV_CTL_ELEM_ACCESS_VOLATILE,
+	.info = t6_eld_info,
+	.get = t6_eld_get,
+};
+
+static const struct snd_kcontrol_new t6_jack_ctl = {
+	.iface = SNDRV_CTL_ELEM_IFACE_CARD,
+	.name = "HDMI/DP,pcm=0 Jack",
+	.access = SNDRV_CTL_ELEM_ACCESS_READ | SNDRV_CTL_ELEM_ACCESS_VOLATILE,
+	.info = snd_ctl_boolean_mono_info,
+	.get = t6_jack_get,
+};
 
 /*
  * A sound card for the adapter's HDMI audio when it reports the format this
@@ -623,6 +718,13 @@ void t6_audio_init(struct t6_device *t6, struct usb_interface *intf)
 	strscpy(pcm->name, "HDMI", sizeof(pcm->name));
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &t6_audio_ops);
 	snd_pcm_set_managed_buffer_all(pcm, SNDRV_DMA_TYPE_VMALLOC, NULL, 0, 0);
+	aud->eld_kctl = snd_ctl_new1(&t6_eld_ctl, aud);
+	aud->jack_kctl = snd_ctl_new1(&t6_jack_ctl, aud);
+	ret = snd_ctl_add(card, aud->eld_kctl);
+	if (!ret)
+		ret = snd_ctl_add(card, aud->jack_kctl);
+	if (ret)
+		goto err_card;
 	t6_audio_read_volume(aud);
 	if (aud->has_vol) {
 		ret = snd_ctl_add(card, snd_ctl_new1(&t6_vol_ctl, aud));
@@ -634,7 +736,13 @@ void t6_audio_init(struct t6_device *t6, struct usb_interface *intf)
 	ret = snd_card_register(card);
 	if (ret)
 		goto err_card;
+	/* The monitor may have been probed before the card existed. */
+	mutex_lock(&t6->drm.mode_config.mutex);
 	t6->audio = aud;
+	t6_audio_eld(t6, &t6_get_head(t6, 0)->connector,
+		     t6_get_head(t6, 0)->connector.status ==
+		     connector_status_connected);
+	mutex_unlock(&t6->drm.mode_config.mutex);
 	dev_info(&intf->dev,
 		 "HDMI audio: 48 kHz, 16 bit, stereo (sound card %d, format %u, buffer %u bytes%s)\n",
 		 card->number, aud->format, aud->cyclic,
@@ -654,7 +762,10 @@ void t6_audio_fini(struct t6_device *t6)
 
 	if (!aud)
 		return;
+	/* t6_audio_eld runs under mode_config.mutex */
+	mutex_lock(&t6->drm.mode_config.mutex);
 	t6->audio = NULL;
+	mutex_unlock(&t6->drm.mode_config.mutex);
 	snd_card_disconnect(aud->card);
 	hrtimer_cancel(&aud->timer);
 	cancel_work_sync(&aud->work);
@@ -719,7 +830,8 @@ void t6_audio_metrics(struct t6_device *t6, char *buf, size_t size)
 		return;
 	}
 	snprintf(buf, size,
-		 "audio=card%d audio_engine=%u audio_starts=%llu audio_packets=%llu audio_prefills=%llu audio_fills=%llu",
+		 "audio=card%d audio_engine=%u audio_starts=%llu audio_packets=%llu audio_prefills=%llu audio_fills=%llu audio_eld=%d",
 		 aud->card->number, READ_ONCE(aud->engine), aud->starts,
-		 aud->packets, aud->prefills, aud->fills);
+		 aud->packets, aud->prefills, aud->fills,
+		 READ_ONCE(aud->eld_size));
 }

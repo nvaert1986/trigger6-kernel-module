@@ -99,6 +99,7 @@
 #define T6_RES_CHUNK_SIZE	512
 #define T6_RES_MAX_ENTRIES	64	/* the tested table has 30 */
 #define T6_EDID_TIMINGS		4	/* detailed timings in an EDID base block */
+#define T6_EDID_MAX_BLOCKS	4	/* base block + up to 3 extension blocks */
 
 /*
  * 0x1C/0x1D: gamma LUT. 0x1C wValue=(output << 8) | op: op 0 at init,
@@ -109,6 +110,34 @@
 #define T6_REQ_LUT_WRITE	0x1D
 #define T6_LUT_OP_RESET		0x00
 #define T6_LUT_OP_COMMIT	0x02
+/*
+ * Gamma table per channel (wIndex of 0x1D), as the vendor driver maps its
+ * R, G and B tables: blue 0x100, green 0x200, red 0x400 (TrgIdd.dll and
+ * T6InDisp.dll). Only on feature level 8 and up; mct-linux saw the gamma
+ * requests stall on a level 6 adapter.
+ */
+#define T6_LUT_CH_BLUE		0x100
+#define T6_LUT_CH_GREEN		0x200
+#define T6_LUT_CH_RED		0x400
+#define T6_REQ_PLATFORM_INFO	0xB0	/* wIndex 4: feature level, u32 */
+#define T6_GAMMA_MIN_LEVEL	8
+
+/*
+ * Hardware cursor, per output (vendor USB capture and mct-linux, verified on
+ * output 0): image upload into a slot (wValue slot, wIndex byte offset),
+ * select-and-show / hide (wValue slot, wIndex 1 / 0) and position of the
+ * image's top left (wValue x, wIndex y). Five slots per output, output 1
+ * from slot 5 on. Image: 8-byte header {u16 kind 1 = ARGB, width, height,
+ * pitch}, then B, G, R, A pixels.
+ */
+#define T6_REQ_CUR_POS(o)	((o) ? 0x06 : 0x04)
+#define T6_REQ_CUR_SHOW(o)	((o) ? 0x07 : 0x05)
+#define T6_REQ_CUR_IMG(o)	((o) ? 0x11 : 0x10)
+#define T6_CUR_SIZE		64	/* square, as the vendor driver uses it */
+#define T6_CUR_BYTES		(8 + T6_CUR_SIZE * T6_CUR_SIZE * 4)
+#define T6_CUR_SLOTS		5
+#define T6_CUR_CHUNK		512	/* upload piece, as the vendor driver sends it */
+#define T6_CUR_MAX_ERRORS	2	/* failed requests in a row before giving up */
 
 /* Video commands */
 #define T6_CMD_FLIP_PRIMARY	3
@@ -282,7 +311,7 @@ struct t6_head {
 	unsigned int mode_count;
 	u32 last_done_fence;	/* from flip-done events */
 	u32 frame_seq;
-	u8 edid_data[256];
+	u8 edid_data[T6_EDID_MAX_BLOCKS * 128];
 	int edid_len;
 	spinlock_t edid_lock;	/* edid_data/edid_len/edid_timings vs. get_modes */
 	/*
@@ -302,6 +331,40 @@ struct t6_head {
 
 	struct drm_crtc crtc;
 	struct drm_plane primary_plane;
+	struct drm_plane cursor_plane;
+
+	/*
+	 * Gamma tables (R, G, B) for request 0x1D, identity until the desktop
+	 * sets a GAMMA_LUT; chip init uploads them again. io_lock. Unused
+	 * below feature level 8 (t6->has_gamma).
+	 */
+	u8 gamma[3][256];
+	atomic64_t gamma_uploads;
+
+	/*
+	 * Hardware cursor. The commit stores the image and position under
+	 * cur_lock and cur_work sends them; the device side (slots, what is
+	 * shown) is cur_work's, under cur_io_lock.
+	 */
+	struct mutex cur_lock;
+	struct work_struct cur_work;
+	u8 *cur_img;		/* header + image as committed */
+	int cur_x, cur_y;
+	bool cur_on;
+	bool cur_pending;
+	bool cur_lost;		/* chip init or mode set: slots may be gone */
+	struct mutex cur_io_lock;
+	u8 *cur_send;		/* cur_work's copy of cur_img */
+	u8 *cur_cache[T6_CUR_SLOTS];	/* what each slot holds */
+	bool cur_cached[T6_CUR_SLOTS];
+	u64 cur_used[T6_CUR_SLOTS];	/* LRU tick */
+	u64 cur_tick;
+	int cur_slot;		/* slot selected on the device */
+	bool cur_visible;
+	unsigned int cur_errors;	/* failed requests in a row */
+	atomic64_t cur_moves;
+	atomic64_t cur_uploads;
+	atomic64_t cur_hits;
 	struct drm_encoder encoder;
 	struct drm_connector connector;
 	struct work_struct tx_work;
@@ -369,6 +432,8 @@ struct t6_device {
 	struct t6_head heads[T6_OUTPUT_COUNT];
 	/* Outputs the adapter has (request 0xB3); 2 if it does not say. */
 	unsigned int output_count;
+	int feature_level;	/* request 0xB0 index 4, -1 if unknown */
+	bool has_gamma;		/* gamma tables (0x1C/0x1D) supported */
 	/* Mode table entries per output from request 0xB3; 0 = not known. */
 	u8 table_entries[T6_OUTPUT_COUNT];
 
@@ -436,6 +501,11 @@ static inline struct t6_head *t6_head_from_crtc(struct drm_crtc *crtc)
 static inline struct t6_head *t6_head_from_plane(struct drm_plane *plane)
 {
 	return container_of(plane, struct t6_head, primary_plane);
+}
+
+static inline struct t6_head *t6_head_from_cursor(struct drm_plane *plane)
+{
+	return container_of(plane, struct t6_head, cursor_plane);
 }
 
 static inline struct t6_head *t6_head_from_connector(struct drm_connector *connector)
@@ -507,6 +577,8 @@ void t6_audio_suspend(struct t6_device *t6);
 void t6_audio_resume(struct t6_device *t6);
 void t6_audio_engine_lost(struct t6_device *t6);
 void t6_audio_metrics(struct t6_device *t6, char *buf, size_t size);
+void t6_audio_eld(struct t6_device *t6, const struct drm_connector *connector,
+		  bool connected);
 #else
 static inline void t6_audio_init(struct t6_device *t6, struct usb_interface *intf) {}
 static inline void t6_audio_fini(struct t6_device *t6) {}
@@ -517,6 +589,9 @@ static inline void t6_audio_metrics(struct t6_device *t6, char *buf, size_t size
 {
 	strscpy(buf, "audio=none", size);
 }
+static inline void t6_audio_eld(struct t6_device *t6,
+				const struct drm_connector *connector,
+				bool connected) {}
 #endif
 
 #endif

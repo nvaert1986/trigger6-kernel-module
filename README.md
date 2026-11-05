@@ -1,4 +1,4 @@
-# MCT Trigger 6 (T6) USB display driver for Linux, release `1.1.0-beta2`
+# MCT Trigger 6 (T6) USB display driver for Linux, release `1.1.0-beta3`
 
 An out-of-tree Linux DRM/KMS kernel driver and a small user-space helper for the
 MCT "T6 USB Station" chipset, as found in the **StarTech USB32HDES** USB 3.0 to HDMI adapter.
@@ -8,12 +8,13 @@ setup, with a stable USB connection.
 > **New in 1.1.0 (beta): HDMI audio support.** The adapter now also appears as a sound card ("Trigger6 USB to HDMI
 > Adapter"). This is a **beta**: the audio was tested virtually (the sound card, PipeWire, the playback stream and
 > the USB transfers to the adapter were all checked) but is **physically untested**: nobody has heard it yet, as
-> none of the test monitors has speakers or an audio output. See the [1.1.0-beta1 entry](#110-beta1-2026-11-05);
-> 1.1.0-beta2 confirms the build on Debian 13 (kernel 6.12).
-> Feedback from a monitor or TV with speakers is welcome. The display part is unchanged from 1.0.5.
+> none of the test monitors has speakers or an audio output. See the [1.1.0-beta1 entry](#110-beta1-2026-11-05).
+> **1.1.0-beta3** adds a hardware cursor (moving the mouse no longer sends whole frames), a gamma table, the
+> monitor's full EDID (extension blocks) and the monitor's audio capabilities (ELD) for the sound card; see the
+> [1.1.0-beta3 entry](#110-beta3-2026-11-05). Feedback from a monitor or TV with speakers is welcome.
 
 > **Status: experimental.** Tested on one adapter model (see
-> [Tested configuration](#tested-configuration)). Version 1.1.0-beta2 works on Wayland and builds on Arch Linux (kernel 7.2) and
+> [Tested configuration](#tested-configuration)). Version 1.1.0-beta3 works on Wayland and builds on Arch Linux (kernel 7.2) and
 > Debian 13 (kernel 6.12). **On Xorg, unplugging the USB adapter crashes the X server** (a bug in Xorg, reported to
 > Debian, see [Limitations](#limitations)); unplugging only the HDMI cable is fine. Use at your own risk.
 
@@ -53,6 +54,8 @@ setup, with a stable USB connection.
 | 1.0.0 and 1.0.1 monitor test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), Dell P2725HE: picture, helper, mode switches, HDMI hotplug, flip-done events and `keepalive_ms=0`, checked against `t6_metrics` and a USB capture |
 | 1.0.3 monitor test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), seven monitors from three brands: each detected on plug-in, set to its native mode, clean picture, no errors |
 | 1.1.0-beta1 audio test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), PipeWire: sound card registered, playback through `aplay` and PipeWire, USB transfers checked with usbmon. **Not heard**: no monitor with speakers or audio output available |
+| 1.1.0-beta3 test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), Dell P2725HE: EDID extension block read, ELD and jack controls, hardware cursor used by KWin, gamma table checked with a warm test table; feature level 8 |
+| 1.1.0-beta3 builds | Linux 6.18.59 and Debian 13 `linux-headers-6.12.113+deb13-amd64` (cross-build, `W=1`, no warnings) |
 | 1.1.0-beta2 builds | Linux 6.18.59 and Debian 13 `linux-headers-6.12.107+deb13-amd64` (cross-build, `W=1`, no warnings); on 6.12 the audio code uses `hrtimer_init()`, on 6.18 `hrtimer_setup()` |
 | 1.0.5 monitor swap test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland): HP E233, iiyama PL2595W and Dell P2319H swapped on the running system; each started on its own preferred timing, no mode change by the desktop afterwards |
 | 1.0.6 builds | Linux 6.18.59 (`W=1`, no warnings); compiled code identical to 1.0.5, no new kernel interfaces |
@@ -269,7 +272,7 @@ name shown under `/sys/bus/usb/drivers/trigger6/`) and retry after a second or t
 sudo apt install dkms build-essential linux-headers-amd64 libyuv0   # Debian 13
 sudo pacman -S --needed dkms base-devel linux-headers libyuv        # Arch (linux-lts-headers for the LTS kernel)
 
-VER=1.1.0-beta2
+VER=1.1.0-beta3
 sudo mkdir -p /usr/src/trigger6-$VER
 sudo cp -r kernel dkms.conf LICENSE README.md /usr/src/trigger6-$VER/
 sudo dkms add     -m trigger6 -v $VER
@@ -283,7 +286,7 @@ sudo modprobe trigger6
 `dkms.conf` is in the repository root (an identical copy is in `packaging/debian13/`) and is copied along as shown.
 DKMS then rebuilds the module for each newly installed kernel. Remember that matching headers must be installed.
 `trigger6.conf` sets `primary_userspace_nv12=1`, so the module uses the fast helper whenever it runs.
-Check the installed version with `modinfo -F version trigger6` (prints `1.1.0-beta2`).
+Check the installed version with `modinfo -F version trigger6` (prints `1.1.0-beta3`).
 
 ### C. Install the helper
 
@@ -408,8 +411,11 @@ Set one at load time with `modprobe trigger6 name=value`.
   as well, up to 1920x1200, 60 Hz and the fastest clock in the adapter's table (item 31).
 * HDMI audio (1.1.0 beta): playback only (48 kHz, 16-bit, stereo), as the adapter reports. Tested
   virtually up to the USB transfers on the adapter, **physically untested** (not heard): none of the test monitors
-  has speakers or an audio output. The
-  monitor's audio capabilities (ELD) are not passed on, as the driver reads only the first EDID block.
+  has speakers or an audio output. The monitor's audio capabilities (ELD) and a jack control are offered on the
+  sound card (1.1.0-beta3); PipeWire currently uses a generic stereo profile for this card and does not read them.
+* Gamma table (1.1.0-beta3): offered on feature level 8 adapters; KDE's Night Light does not use it on this output
+  (it applies its colour change in shaders), so the table is used only by programs that set `GAMMA_LUT` or the
+  legacy gamma ioctl.
 * NV12 uses 4:2:0 colour, so tiny coloured text is slightly less sharp than RGB.
 * The reported FPS is the number of frames sent. It is not a camera or analyser measurement of visible frames.
 * Only the StarTech USB32HDES / `0711:5601` was tested. Other MCT T6 products (including the 4-output USB-C models in the upstream project) are not covered by these measurements.
@@ -424,6 +430,60 @@ Set one at load time with `modprobe trigger6 name=value`.
   and recovery from a USB transport fault (step 7, no clean way to cause one).
 
 ## Changelog
+
+### 1.1.0-beta3 (2026-11-05)
+
+Still a **beta: HDMI audio is tested virtually, physically untested** (see 1.1.0-beta1 below). New display features:
+a hardware cursor, a gamma table and the monitor's full EDID. Upgrading an existing DKMS install: run
+`dkms remove trigger6/1.1.0-beta2 --all` (or the installed version), then install `1.1.0-beta3` as in
+[section B](#b-permanent-install-with-dkms-debian-13--ubuntu--arch). Includes `1.0.6` (item 39). The helper and its
+service are unchanged.
+
+**Testing status, stated plainly:** builds without warnings (`W=1`) against Linux 6.18.59 and, as a cross-build,
+against Debian 13's `linux-headers-6.12.113+deb13-amd64`. Tested on the adapter with a Dell P2725HE under KDE Plasma
+(Wayland) on Gentoo, Linux 6.18.59, per item below. The cursor, gamma and EDID requests were compared with the
+vendor's Windows driver (`T6InDisp.dll`, `TrgIdd.dll`, `t6sta.sys`). Not tested: a monitor with audio (ELD with
+audio formats), a dual-output adapter (second cursor and gamma table), suspend/resume.
+
+
+40. **EDID extension blocks are read** (`t6_read_edid_ext`, `t6_probe_head`, `t6_connector_get_modes`). Only the
+    128-byte base block was read, and its extension count was cleared so DRM would not expect missing blocks. The
+    driver now reads every extension block the monitor announces (up to three) with request `0x80`, wValue = byte
+    offset (block x 128), as the vendor driver does, and passes the whole EDID to DRM. A block that fails to read,
+    is empty or has a bad checksum is left out, and the base block's count and checksum are corrected to match. With
+    the CTA-861 block DRM knows whether the monitor is HDMI or DVI and which audio formats it takes (the basis for
+    ELD and jack reporting later). The offered modes are unchanged: they still come from the adapter's mode table and
+    the base block. The kernel log reports the number of extension blocks per monitor.
+    *Tested:* Dell P2725HE on Gentoo, Linux 6.18.59, KDE Plasma (Wayland): one CTA-861 block read, the connector's
+    EDID is 256 bytes and passes `edid-decode -c` (warnings only from the monitor's own EDID), no errors.
+41. **Volume at start-up checked** (`t6_audio_read_volume`). The adapter's volume read back as 31 of 31 after chip
+    init, in the same layout as the `0x23` request. The "2 of 31" seen earlier was the desktop's own volume: PipeWire
+    puts a new sink at 40% (-23.9 dB), which is 2 of 31 on this linear scale. The claim that the adapter powers up at
+    volume 2 is removed from the code comment and item 37.
+42. **ELD and jack controls for HDMI audio** (`t6_audio_eld`). The sound card now has an "ELD" control (the
+    monitor's name and audio formats, built by DRM from the EDID, item 40) and an "HDMI/DP,pcm=0 Jack" control, as
+    mct-linux and HDMI sound drivers offer them. The jack is plugged while a monitor with an EDID is connected. The
+    vendor's Windows driver takes its jack state from interrupt event `0x20` instead, but the tested adapter sent that
+    jack bit with no monitor connected at all, so it is not used. Whether PipeWire uses these controls depends on its
+    profile for this card (it currently picks a generic stereo profile). *Tested:* Dell P2725HE: ELD "DELL P2725HE",
+    jack plugged, both visible with `amixer -c Trigger6 contents`.
+43. **Gamma table** (`t6_crtc_atomic_flush`, `t6_load_lut`). The CRTC offers a 256-entry `GAMMA_LUT` (and the
+    legacy gamma ioctl through it), uploaded with `0x1D` and enabled with `0x1C`, and kept for every chip init. As
+    in the vendor's Windows driver (`TrgIdd.dll`, `T6InDisp.dll`), the tables go to wIndex `0x100` = blue, `0x200` =
+    green, `0x400` = red, and only on feature level 8 and up (request `0xB0` index 4, now read and logged at probe);
+    below that no gamma request is sent and no gamma property offered (mct-linux saw them stall on a level 6
+    adapter). *Tested:* feature level 8 on the tested adapter; a warm test table (red full, green 80%, blue 50%)
+    turned the Dell warm, which confirms the channel order. KDE's Night Light currently does not use the table on
+    this output (it applies its colour matrix in shaders), so it looks the same as before.
+44. **Hardware cursor** (`t6_cursor_*`). A 64x64 ARGB cursor plane. As in the vendor's Windows driver, the image
+    goes into one of five slots per output (`0x10`/`0x11`, 512-byte pieces), is selected with `0x05`/`0x07` and moved
+    with `0x04`/`0x06` (top left of the image, negative values as v - 1). A new image goes into a slot that is not on
+    screen, and shapes seen before are selected again without an upload (mct-linux). Moving the mouse sends one
+    small control request instead of a frame. The cursor is sent again after a chip init, a mode set and event
+    `0x10`; after two failed cursor requests in a row it stops until the next re-init, so it cannot drive the
+    control error counter into a USB reset. The DRM minimum framebuffer size (640x480, inherited) is now 0: it
+    rejected the compositor's 64x64 cursor buffers. *Tested:* KDE Plasma (Wayland) uses the plane: 73 cursor moves,
+    2 uploads, 2 shapes reused from a slot, 27 frames sent while the mouse moved, no errors.
 
 ### 1.1.0-beta2 (2026-11-05)
 
@@ -472,8 +532,8 @@ not by ear**: none of the available monitors has speakers or an audio output.
     (the value is not an immediate); it is the part verified by ear in mct-linux.
     The driver offers an ALSA sound card "Trigger6 USB to HDMI Adapter" (card ID `Trigger6`, one PCM playback
     device, 48 kHz S16_LE stereo) with "PCM Playback Volume" and "PCM Playback Switch", sets the adapter's volume to
-    31 of 31 at start-up as Windows and macOS do (it powers up at 2), restarts the engine after a chip re-init (which
-    sends audio off), and reports `audio`, `audio_engine`, `audio_starts`, `audio_packets`, `audio_prefills` and
+    31 of 31 at start-up as Windows and macOS do (read back as 31 of 31 on the tested adapter), restarts the engine
+    after a chip re-init (which sends audio off), and reports `audio`, `audio_engine`, `audio_starts`, `audio_packets`, `audio_prefills` and
     `audio_fills` in `t6_metrics`. New module parameters `audio` and `audio_lead_ms`.
     **Change from mct-linux:** it took the whole 90 ms lead from the ALSA buffer at the start. PipeWire keeps about
     100 ms queued, so it was left with a few ms of margin and ran into an underrun every 0.4 s (20 engine restarts
@@ -729,7 +789,8 @@ Each item below is backed by the USB capture of the vendor driver and/or static 
     no startup frames at all; its first bulk transfer is a real frame.
 20. **Chip init follows the vendor order** (`t6_chip_init`). Audio volume first (`0x23`; described as colour setup
     until 1.0.6, item 39), LUT reset for both outputs (`0x1C` 0x0000/0x0100), one all-zero `0x31`, the per-output
-    mode tables, `SET_RESOLUTION` and enable per output, HDMI audio off, then an identity gamma upload with commit per output (`0x1D` x3, `0x1C` (output << 8) | 2).
+    mode tables, `SET_RESOLUTION` and enable per output, HDMI audio off, then an identity gamma upload with commit per
+    output (`0x1D` x3, `0x1C` (output << 8) | 2).
     Before: the volume after the resets, `0x31` per output, and two `0x24` requests that turned out to be **HDMI audio
     off/on** (payload: on/off, buffer 0x2580 bytes, 2 channels), so every init switched audio on without audio data;
     and `0x1C` 0x0002 committed output 0's gamma table without uploading one. `0x24` is now only sent as "off".
@@ -930,6 +991,7 @@ original companion tools goes to the original author. The copyright notice
 * The user-space SIMD bridge (`trigger6_bridge.h`, `trigger6-fast`), the asynchronous two-URB USB path and the removal of per-frame copies.
 * `0.9.0-r9`: review fixes for fault recovery, probe error handling, output switch-off, suspend/resume, mode handling and the helper, plus corrected 1080p timing and volume request data.
 * `1.0.0`: init and mode-set sequence, interrupt endpoint, the adapter's own mode table and sync encoding (see [Changelog](#changelog)).
+* `1.1.0-beta3`: hardware cursor, gamma table, EDID extension blocks, ELD and jack controls.
 * `1.1.0-beta2`: Debian 13 (6.12) build of the audio code confirmed.
 * `1.1.0-beta1`: HDMI audio as an ALSA sound card (beta: tested virtually, physically untested), ported from mct-linux and adapted for PipeWire.
 * `1.0.6`: request `0x23` correctly named as the audio volume (no change in behaviour).

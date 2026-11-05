@@ -1,4 +1,4 @@
-# trigger6 1.1.0-beta2 - target: Debian 13 (trixie), kernel 6.12.x LTS
+# trigger6 1.1.0-beta3 - target: Debian 13 (trixie), kernel 6.12.x LTS
 
 ## Package `trigger6-dkms` (kernel module)
 | Dependency | Type | Notes |
@@ -78,3 +78,8 @@ Without the helper the driver falls back to in-kernel conversion (~29 fps).
 
 ## 1.1.0-beta2 - additional checks
 - Cross-built against Debian 13's `linux-headers-6.12.107+deb13-amd64` with `W=1`: no errors or warnings. On 6.12 the audio code uses `hrtimer_init()` (6.12 has no `hrtimer_setup()`), vermagic `6.12.107+deb13-amd64`. Built with GCC 15 instead of Debian's GCC 14; not yet run on a Debian machine.
+
+## 1.1.0-beta3 - additional checks
+- No new packages. New kernel interfaces used: DRM ELD helpers (`drm/drm_eld.h`), colour management (`GAMMA_LUT`) and a cursor plane; all present in 6.12.
+- Cross-built against Debian 13's `linux-headers-6.12.113+deb13-amd64` with `W=1`: no errors or warnings, vermagic `6.12.113+deb13-amd64`. Not yet run on a Debian machine.
+- Compiled against 6.18.59 (Gentoo, `W=1`, no errors or warnings) and tested on the adapter (Dell P2725HE, KDE Plasma Wayland): hardware cursor, gamma table, EDID extension block, ELD and jack controls.

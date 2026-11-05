@@ -25,8 +25,12 @@ static enum drm_connector_status
 t6_connector_detect(struct drm_connector *connector, bool force)
 {
 	struct t6_head *head = t6_head_from_connector(connector);
+	bool connected = t6_head_runtime_connected(head);
 
-	return t6_head_runtime_connected(head) ?
+	/* No get_modes for a disconnected output: clear its audio here. */
+	if (!connected && head->output_idx == 0)
+		t6_audio_eld(head->t6, connector, false);
+	return connected ?
 		connector_status_connected : connector_status_disconnected;
 }
 
@@ -165,7 +169,7 @@ static int t6_connector_get_modes(struct drm_connector *connector)
 	struct drm_display_mode *mode;
 	const struct drm_edid *drm_edid = NULL;
 	struct t6_edid_limits lim = { 0 };
-	u8 edid[EDID_LENGTH];
+	u8 edid[T6_EDID_MAX_BLOCKS * EDID_LENGTH];
 	u8 et[T6_EDID_TIMINGS][T6_RES_ENTRY_SIZE];
 	unsigned int et_count, j;
 	const u8 *pref_timing = NULL;
@@ -176,14 +180,17 @@ static int t6_connector_get_modes(struct drm_connector *connector)
 	int count = 0;
 	int i;
 
-	if (!t6_head_runtime_connected(head))
+	if (!t6_head_runtime_connected(head)) {
+		if (head->output_idx == 0)
+			t6_audio_eld(head->t6, connector, false);
 		return 0;
+	}
 
 	/* Snapshot: the reprobe worker may be refreshing edid_data. */
 	spin_lock(&head->edid_lock);
 	edid_len = head->edid_len;
 	if (edid_len >= EDID_LENGTH)
-		memcpy(edid, head->edid_data, EDID_LENGTH);
+		memcpy(edid, head->edid_data, edid_len);
 	et_count = head->edid_timing_count;
 	et_pref = head->edid_timing_pref;
 	memcpy(et, head->edid_timings, et_count * T6_RES_ENTRY_SIZE);
@@ -191,21 +198,20 @@ static int t6_connector_get_modes(struct drm_connector *connector)
 
 	if (edid_len >= EDID_LENGTH) {
 		/*
-		 * Only the base block is read from the device. Clear its
-		 * extension count (and fix the checksum) so neither DRM nor
-		 * userspace expects blocks that were never read: with one
-		 * extension DRM saw an all-zero block, with more it read past
-		 * the end of edid_data.
+		 * The base block and the extension blocks that were read; its
+		 * extension count matches them (t6_read_edid_ext). With the
+		 * CEA-861 block DRM knows HDMI vs DVI and the audio formats.
 		 */
-		edid[0x7f] += edid[0x7e];
-		edid[0x7e] = 0;
-		drm_edid = drm_edid_alloc(edid, EDID_LENGTH);
+		drm_edid = drm_edid_alloc(edid, edid_len);
 		if (drm_edid && !drm_edid_valid(drm_edid)) {
 			drm_edid_free(drm_edid);
 			drm_edid = NULL;
 		}
 	}
 	drm_edid_connector_update(connector, drm_edid);
+	/* HDMI audio is on output 0; DRM built the ELD from the EDID above. */
+	if (head->output_idx == 0)
+		t6_audio_eld(head->t6, connector, !!drm_edid);
 	if (drm_edid) {
 		/* Extract physical size for HiDPI scaling (EDID bytes 0x15-0x16 = cm) */
 		if (edid[0x15] && edid[0x16]) {
