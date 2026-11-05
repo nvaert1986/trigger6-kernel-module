@@ -42,6 +42,7 @@ setup, with a stable USB connection.
 | Host OS / kernel (`0.9.0-r8` measurements) | Arch Linux, `7.2.9-arch1-1`, Xorg |
 | 1.0.0 hardware test | Works on Wayland. On Xorg it works until the USB adapter is unplugged: then the X server crashes (see [Limitations](#limitations)) |
 | 1.0.0 builds | Arch Linux kernel 7.2, Debian 13 kernel 6.12, Linux 6.18.59 (`W=1`, no warnings) |
+| 1.0.0 start-up test | Gentoo, Linux 6.18.59 with enforced module signatures: plug-in, chip init, mode table and unplug checked against a USB capture (no monitor attached yet) |
 
 Check your own adapter with:
 
@@ -214,7 +215,20 @@ cd trigger6-kernel-module
 ```bash
 cd kernel
 make                                    # builds trigger6.ko for the running kernel
+sudo modprobe -a drm_kms_helper drm_shmem_helper   # insmod does not load dependencies
 sudo insmod ./trigger6.ko primary_userspace_nv12=1
+```
+
+`insmod` loads only this one file. If `drm_shmem_helper` is not loaded yet, it fails with `Unknown symbol in module`
+(`dmesg` names `drm_gem_shmem_dumb_create`), hence the `modprobe` line. An installed module (section B) loads its
+dependencies by itself with `modprobe trigger6`.
+
+On a kernel that only accepts signed modules (Secure Boot, `CONFIG_MODULE_SIG_FORCE`, lockdown), sign the module
+before `insmod`, with the key your kernel was built with, and again after every rebuild:
+
+```bash
+sudo /lib/modules/$(uname -r)/build/scripts/sign-file sha256 <signing key .pem> <certificate .x509> trigger6.ko
+modinfo -F signer trigger6.ko           # prints the key's name when signed
 ```
 
 For a different kernel use `make KVER=<version>`. To unload: stop the helper, switch the output off (Xorg:
@@ -327,6 +341,9 @@ Set one at load time with `modprobe trigger6 name=value`.
 * **No output / black screen after plug-in:** re-activate the output with `xrandr` (Xorg) or the display settings (Wayland). After a re-enumeration the device number changes, so the helper must pick up the new node (it does when restarted).
 * **Stutter when moving the mouse:** make sure `trigger6-fast` is actually running (`pgrep -a trigger6`). Without it you only get the in-kernel fallback.
 * **`insmod: File exists` / `rmmod: in use`:** unbind the interface first (see section A).
+* **`insmod: ... Unknown symbol in module`:** a dependency is not loaded. Run `modprobe -a drm_kms_helper drm_shmem_helper`
+  first (see section A).
+* **`insmod: ... Key was rejected by service`:** the kernel only accepts signed modules; sign it (see section A).
 * **Build fails with an unknown DRM symbol:** please report the exact kernel version. The code detects `drm_atomic_commit` and `drm_dev_set_dma_dev` from the headers, but other API differences may exist.
 * **Frequent disconnects:** connect the adapter directly to a USB 3.0 port, not a hub.
 * **Xorg crashes (SIGSEGV) when the USB adapter is unplugged:** this is the X server failing on the removal of a
@@ -369,7 +386,11 @@ warnings (`W=1`) against Linux 6.18.59. Checked offline against the vendor drive
 of the captured adapter pass the table reader and the mode lookup. **Hardware test on the adapter:** fully working on
 Wayland, including the changed init and mode-change sequence (items 20 and 21). On Xorg everything works except
 unplugging the USB adapter, which crashes the X server with a segmentation fault (an Xorg bug, reported to Debian;
-see [Limitations](#limitations)). Unplugging the HDMI cable works on both.
+see [Limitations](#limitations)). Unplugging the HDMI cable works on both. Colours confirmed correct (item 17).
+A start-up test on Linux 6.18.59 (adapter without monitor, recorded with usbmon) showed the new init sequence
+(items 20 and 23) on the wire in the same order as the vendor capture, with every request accepted, 30 entries read
+from the mode table (item 22), the interrupt endpoint running (item 18) and a clean unplug. That test also showed a
+so far unknown interrupt event, type `0x20`, once after each start-up; it is logged as `T6 event` and is harmless.
 
 #### Protocol changes
 
@@ -425,7 +446,8 @@ Each item below is backed by the USB capture of the vendor driver and/or static 
 #### Hardware test checklist (0.9.0-r9 and 1.0.0 changes)
 
 Result so far: fully working on Wayland; on Xorg, unplugging the USB adapter crashes the X server (see
-[Limitations](#limitations)). The steps that use `xrandr` are for Xorg; on Wayland, use the desktop's display
+[Limitations](#limitations)). Step 10 (colours) is confirmed. Step 1 is confirmed without a monitor (30 table
+entries; one `T6 event` line of type `0x20` after start-up is expected). The steps that use `xrandr` are for Xorg; on Wayland, use the desktop's display
 settings (on KDE Plasma: `kscreen-doctor`) instead.
 
 1. Plug in with `primary_userspace_nv12=1`: desktop after login. `dmesg` shows `Output 0: device mode table has N
