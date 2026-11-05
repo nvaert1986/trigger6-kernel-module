@@ -16,6 +16,9 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #define MAGIC 0x314e3654u
+/* No adapter, or it was unplugged: the service has RestartPreventExitStatus=3, so systemd does not restart. */
+#define EXIT_NO_DEVICE 3
+#define DEVICE_GONE(e) ((e)==ENODEV||(e)==ENXIO||(e)==ENOENT)
 #define MAX_W 1920u
 #define MAX_H 1200u
 #define SLOTS 3
@@ -60,7 +63,7 @@ static void *write_frames(void *arg)
   if(n==(ssize_t)bytes)w->sent++;
   else if(n<0 && error==ESTALE)w->stale++;
   else {
-   errno=error;perror("bridge write");w->status=1;w->stop=1;stopped=1;
+   errno=error;perror("bridge write");w->status=DEVICE_GONE(error)?EXIT_NO_DEVICE:1;w->stop=1;stopped=1;
    kill(getpid(),SIGUSR1);
   }
  }
@@ -74,8 +77,8 @@ int main(int argc,char **argv)
  convert_fn convert=(convert_fn)dlsym(lib,"ARGBToNV12");
  if(!convert){fprintf(stderr,"ARGBToNV12 missing\n");return 1;}
  glob_t devices={0};const char *path=argc>1?argv[1]:NULL;
- if(!path){if(glob("/dev/trigger6-*-out0-nv12",0,NULL,&devices)||devices.gl_pathc!=1){fprintf(stderr,"Specify exactly one T6 NV12 device\n");return 1;}path=devices.gl_pathv[0];}
- int fd=open(path,O_RDWR|O_CLOEXEC|O_NOFOLLOW);if(fd<0){perror(path);return 1;}
+ if(!path){int g=glob("/dev/trigger6-*-out0-nv12",0,NULL,&devices);if(g==GLOB_NOMATCH||(!g&&!devices.gl_pathc)){fprintf(stderr,"No T6 NV12 device found\n");return EXIT_NO_DEVICE;}if(g||devices.gl_pathc!=1){fprintf(stderr,"Specify exactly one T6 NV12 device\n");return 1;}path=devices.gl_pathv[0];}
+ int fd=open(path,O_RDWR|O_CLOEXEC|O_NOFOLLOW);if(fd<0){int e=errno;perror(path);return DEVICE_GONE(e)?EXIT_NO_DEVICE:1;}
  struct stat st;if(fstat(fd,&st)||!S_ISCHR(st.st_mode)){fprintf(stderr,"Not a character device\n");return 1;}
  const size_t max_raw=MAX_W*MAX_H*4,max_nv12=MAX_W*MAX_H*3/2;
  uint8_t *in=NULL;
@@ -96,7 +99,7 @@ int main(int argc,char **argv)
  printf("SIMD pipeline active: %s, target <=60 fps, bounded latest-frame queue\n",path);fflush(stdout);
  while(!stopped){
   double started=now();ssize_t n=read(fd,in,sizeof(struct packet)+max_raw);read_seconds+=now()-started;
-  if(n<0){if(errno==EINTR)continue;perror("bridge read");status=1;break;}
+  if(n<0){if(errno==EINTR)continue;int e=errno;perror("bridge read");status=DEVICE_GONE(e)?EXIT_NO_DEVICE:1;break;}
   if(n<(ssize_t)sizeof(struct packet)){fprintf(stderr,"Short frame\n");status=1;break;}
   struct packet *input=(struct packet*)in;
   uint32_t w=le32toh(input->width),h=le32toh(input->height),stride=le32toh(input->stride);

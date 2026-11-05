@@ -1,4 +1,4 @@
-# MCT Trigger 6 (T6) USB display driver for Linux, release `1.0.1`
+# MCT Trigger 6 (T6) USB display driver for Linux, release `1.0.2`
 
 An out-of-tree Linux DRM/KMS kernel driver and a small user-space helper for the
 MCT "T6 USB Station" chipset, as found in the **StarTech USB32HDES** USB 3.0 to HDMI adapter.
@@ -6,7 +6,7 @@ This release reaches about **60 new frames per second at 1920x1080** on the test
 setup, with a stable USB connection.
 
 > **Status: experimental.** Tested on one adapter model (see
-> [Tested configuration](#tested-configuration)). Version 1.0.1 works on Wayland and builds on Arch Linux (kernel 7.2) and
+> [Tested configuration](#tested-configuration)). Version 1.0.2 works on Wayland and builds on Arch Linux (kernel 7.2) and
 > Debian 13 (kernel 6.12). **On Xorg, unplugging the USB adapter crashes the X server** (a bug in Xorg, reported to
 > Debian, see [Limitations](#limitations)); unplugging only the HDMI cable is fine. Use at your own risk.
 
@@ -44,6 +44,7 @@ setup, with a stable USB connection.
 | 1.0.0 builds | Arch Linux kernel 7.2, Debian 13 kernel 6.12, Linux 6.18.59 (`W=1`, no warnings) |
 | 1.0.0 start-up test | Gentoo, Linux 6.18.59 with enforced module signatures: plug-in, chip init, mode table and unplug checked against a USB capture (no monitor attached yet) |
 | 1.0.0 and 1.0.1 monitor test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), Dell P2725HE: picture, helper, mode switches, HDMI hotplug, flip-done events and `keepalive_ms=0`, checked against `t6_metrics` and a USB capture |
+| 1.0.2 helper autostart | Gentoo with systemd, KDE Plasma (Wayland): udev rule and user service start the helper on plug-in and end it cleanly on unplug |
 | 1.0.1 builds | Linux 6.18.59 (`W=1`, no warnings); uses no kernel interfaces beyond those 1.0.0 needs, which builds on Debian 13 (6.12) and Arch Linux (7.2) |
 
 Check your own adapter with:
@@ -244,7 +245,7 @@ name shown under `/sys/bus/usb/drivers/trigger6/`) and retry after a second or t
 sudo apt install dkms build-essential linux-headers-amd64 libyuv0   # Debian 13
 sudo pacman -S --needed dkms base-devel linux-headers libyuv        # Arch (linux-lts-headers for the LTS kernel)
 
-VER=1.0.1
+VER=1.0.2
 sudo mkdir -p /usr/src/trigger6-$VER
 sudo cp -r kernel dkms.conf LICENSE README.md /usr/src/trigger6-$VER/
 sudo dkms add     -m trigger6 -v $VER
@@ -258,7 +259,7 @@ sudo modprobe trigger6
 `dkms.conf` is in the repository root (an identical copy is in `packaging/debian13/`) and is copied along as shown.
 DKMS then rebuilds the module for each newly installed kernel. Remember that matching headers must be installed.
 `trigger6.conf` sets `primary_userspace_nv12=1`, so the module uses the fast helper whenever it runs.
-Check the installed version with `modinfo -F version trigger6` (prints `1.0.1`).
+Check the installed version with `modinfo -F version trigger6` (prints `1.0.2`).
 
 ### C. Install the helper
 
@@ -287,8 +288,10 @@ The service file starts `/usr/bin/trigger6-fast` (the path a distribution packag
 it at `/usr/local/bin`, where section C installs the helper. The udev rule gives the logged-in seat user access to the
 adapter and asks systemd to start the helper service when the bridge node appears, so there is nothing to enable.
 Unplug and replug the adapter once (or reboot) so the rule applies. Check it with
-`systemctl --user status trigger6-fast`.
-**This udev/systemd integration has not been tested on Debian.** Manual alternative for one session:
+`systemctl --user status trigger6-fast`. When the adapter is unplugged, the helper ends with exit code 3, which the
+service treats as a normal end (`SuccessExitStatus=3`): it shows as inactive and is not restarted until the adapter
+returns. Crashes are still restarted after 2 s. Tested on Gentoo with systemd and KDE Plasma (Wayland), not yet on
+Debian. Manual alternative for one session:
 
 ```bash
 sudo setfacl -m u:$USER:rw /dev/trigger6-*-out0-nv12
@@ -303,7 +306,8 @@ trigger6-fast /dev/trigger6-002-003-out0-nv12   # or give the node explicitly
 ```
 
 It prints a status line every 30 s (`sent`, `converted`, `avg_convert_ms`, `avg_read_ms`, `avg_write_ms`). Stop it with
-`SIGTERM`/`Ctrl-C`. The screen then continues on the slower in-kernel fallback.
+`SIGTERM`/`Ctrl-C`. The screen then continues on the slower in-kernel fallback. Exit codes: 0 after a stop signal,
+3 when no adapter is present or it was unplugged, 1 for any other error.
 
 ## Activating the monitor
 
@@ -373,10 +377,33 @@ Set one at load time with `modprobe trigger6 name=value`.
   problems. The driver removes the device the standard DRM way (`drm_dev_unplug()`), and the crash is in the X server,
   so it has been reported to Debian as an Xorg bug. Until that is fixed, use Wayland, or log out of the Xorg session
   before unplugging the adapter.
-* Builds on Debian 13 (kernel 6.12) and Arch Linux (kernel 7.2). Not tested with KASAN/lockdep kernels, and the
-  udev/systemd integration is untested.
+* Builds on Debian 13 (kernel 6.12) and Arch Linux (kernel 7.2). Not tested with KASAN/lockdep kernels. The
+  udev/systemd integration is tested on Gentoo with systemd, not yet on Debian.
+* Not tested: suspend/resume with the adapter connected (checklist steps 4 and 5), HDMI audio side effects (step 14)
+  and recovery from a USB transport fault (step 7, no clean way to cause one).
 
 ## Changelog
+
+### 1.0.2 (2026-11-05)
+
+Upgrading: install the new helper and `trigger6-fast.service` as in [section C](#c-install-the-helper) and
+[section D](#d-device-permissions-and-autostart-recommended), then run `systemctl --user daemon-reload`. The kernel
+module is unchanged apart from its version number; a DKMS install can stay on 1.0.1 or be replaced as in
+[section B](#b-permanent-install-with-dkms-debian-13--ubuntu--arch). Includes everything from `1.0.1` below.
+
+**Testing status, stated plainly:** tested on Gentoo with systemd, KDE Plasma (Wayland) and a Dell P2725HE. The udev
+rule and user service start the helper on plug-in and give the logged-in user access to the adapter without manual
+`setfacl`. After this fix, unplugging ends the helper once with exit code 3 and the service stays inactive (0
+restarts; before, 8 restarts in about 16 s and counting). The same round confirmed checklist steps 2, 3, 8 and 9
+(see the checklist below). Not yet tested on Debian.
+
+30. **Helper service restarted endlessly after unplug** (`trigger6-fast.c`, `trigger6-fast.service`). When the adapter
+    was unplugged, the helper exited with code 1, the service (`Restart=on-failure`) started it again every 2 s, and
+    every new start failed at once with "Specify exactly one T6 NV12 device" because the device node was gone;
+    `ConditionPathExistsGlob` did not stop these automatic restarts. *Fix:* the helper exits with code 3 when no
+    adapter is present, when its device node is gone, or when reading or writing fails because the device was
+    removed; other errors still exit with 1. The service treats code 3 as a normal end (`SuccessExitStatus=3`), so it
+    is not restarted and does not show as failed. The udev rule starts it again when the adapter returns.
 
 ### 1.0.1 (2026-11-05)
 
@@ -490,12 +517,16 @@ Each item below is backed by the USB capture of the vendor driver and/or static 
 * The second logical output is still allocated (about 31 MB) and polled every 5 s on single-output adapters. The
   USB ID does not say whether the board has one or two outputs, so this needs a probe-time capability check first.
 
-#### Hardware test checklist (0.9.0-r9 to 1.0.1 changes)
+#### Hardware test checklist (0.9.0-r9 to 1.0.2 changes)
 
 Result so far: fully working on Wayland; on Xorg, unplugging the USB adapter crashes the X server (see
-[Limitations](#limitations)). Confirmed on the adapter: steps 1, 6 (1920x1080@50 instead of @30, which 1.0.1 does
-not offer on monitors that do not accept 30 Hz), 10, 11 (with 1.0.1: `head0 flips_done` follows `sent_frames` plus
-`keepalive_sent`), 12 (picture kept for 155 s without frames) and 13, plus HDMI unplug/replug of the monitor. Since 1.0.1 no `T6 event`
+[Limitations](#limitations)). Confirmed on the adapter: steps 1, 2, 3 (the monitor went to standby and stayed
+there, no frames sent while the output was off), 6 (1920x1080@50 instead of @30, which 1.0.1 does not offer on
+monitors that do not accept 30 Hz), 8 (`systemctl --user stop` returned in 37 ms), 9 (the monitor reports 1920x1080
+at 60 Hz, 24-bit), 10, 11 (with 1.0.1: `head0 flips_done` follows `sent_frames` plus `keepalive_sent`), 12 (picture
+kept for 155 s without frames) and 13, plus HDMI unplug/replug of the monitor. Not tested: steps 4 and 5 (no
+suspend on the test machine), 7 (no clean way to cause a transport fault) and 14 (nothing connected to the
+monitor's audio output). Since 1.0.1 no `T6 event`
 lines are expected around start-up or hotplug; any that appear are genuinely unknown events. The steps that use `xrandr` are for Xorg; on Wayland, use the desktop's display
 settings (on KDE Plasma: `kscreen-doctor`) instead.
 
@@ -647,6 +678,7 @@ original companion tools goes to the original author. The copyright notice
 * The user-space SIMD bridge (`trigger6_bridge.h`, `trigger6-fast`), the asynchronous two-URB USB path and the removal of per-frame copies.
 * `0.9.0-r9`: review fixes for fault recovery, probe error handling, output switch-off, suspend/resume, mode handling and the helper, plus corrected 1080p timing and colour data.
 * `1.0.0`: init and mode-set sequence, interrupt endpoint, the adapter's own mode table and sync encoding (see [Changelog](#changelog)).
+* `1.0.2`: the helper ends cleanly when the adapter is unplugged instead of being restarted every 2 s.
 * `1.0.1`: interrupt events decoded as the vendor driver does (flip done, monitor hotplug), modes filtered by the monitor's EDID, and no second chip init at plug-in.
 * This work was done by the fork maintainer together with AI coding assistants (OpenAI Codex, then Anthropic Claude Code). Protocol facts also come from a static analysis of the vendor's Windows driver. No vendor code is included.
 

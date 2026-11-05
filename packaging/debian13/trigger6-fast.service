@@ -6,6 +6,10 @@ ConditionPathExistsGlob=/dev/trigger6-*-out0-nv12
 ExecStart=/usr/bin/trigger6-fast
 Restart=on-failure
 RestartSec=2
+# Exit code 3: no adapter, or it was unplugged. That is a normal end, not a failure:
+# the udev rule starts the service again when the adapter returns, and restarting
+# before that only fails again.
+SuccessExitStatus=3
 
 [Install]
 WantedBy=default.target
