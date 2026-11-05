@@ -1,4 +1,4 @@
-# MCT Trigger 6 (T6) USB display driver for Linux, release `1.1.0-beta3`
+# MCT Trigger 6 (T6) USB display driver for Linux, release `1.1.0-beta4`
 
 An out-of-tree Linux DRM/KMS kernel driver and a small user-space helper for the
 MCT "T6 USB Station" chipset, as found in the **StarTech USB32HDES** USB 3.0 to HDMI adapter.
@@ -11,10 +11,11 @@ setup, with a stable USB connection.
 > [1.1.0-beta1 entry](#110-beta1-2026-11-05) and the [audio test](#tested-configuration). **1.1.0-beta3** adds a
 > hardware cursor (moving the mouse no longer sends whole frames), a gamma table, the monitor's full EDID (extension
 > blocks) and the monitor's audio capabilities (ELD) for the sound card; see the
-> [1.1.0-beta3 entry](#110-beta3-2026-11-05). It is still a beta until it has run on a Debian machine.
+> [1.1.0-beta3 entry](#110-beta3-2026-11-05). **1.1.0-beta4** fixes a second cursor and the picture after an HDMI
+> replug ([1.1.0-beta4 entry](#110-beta4-2026-11-05)). It is still a beta until it has run on a Debian machine.
 
 > **Status: experimental.** Tested on one adapter model (see
-> [Tested configuration](#tested-configuration)). Version 1.1.0-beta3 works on Wayland and builds on Arch Linux (kernel 7.2) and
+> [Tested configuration](#tested-configuration)). Version 1.1.0-beta4 works on Wayland and builds on Arch Linux (kernel 7.2) and
 > Debian 13 (kernel 6.12). **On Xorg, unplugging the USB adapter crashes the X server** (a bug in Xorg, reported to
 > Debian, see [Limitations](#limitations)); unplugging only the HDMI cable is fine. Use at your own risk.
 
@@ -55,6 +56,8 @@ setup, with a stable USB connection.
 | 1.0.3 monitor test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), seven monitors from three brands: each detected on plug-in, set to its native mode, clean picture, no errors |
 | 1.1.0-beta1 audio test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), PipeWire: sound card registered, playback through `aplay` and PipeWire, USB transfers checked with usbmon. **Not heard**: no monitor with speakers or audio output available |
 | 1.1.0-beta3 audio test (by ear) | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), PipeWire, iiyama PL2595W (2 x 2 W speakers, OSD Audio Source = HDMI): audio heard, 4532 packets with 0 underruns (`audio_fills=0`), no USB errors; ELD "PL2595W" with LPCM 2 ch 32/44.1/48 kHz 16/20/24 bit, jack plugged; after an HDMI replug during playback the audio came back by itself (engine restarted, still 0 underruns) |
+| 1.1.0-beta4 replug test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), Dell P2725HE: slow and fast HDMI replugs with the pointer on the monitor and on the laptop screen: one cursor and a clean picture each time, no errors |
+| 1.1.0-beta4 builds | Linux 6.18.59 and Debian 13 `linux-headers-6.12.113+deb13-amd64` (cross-build, `W=1`, no warnings) |
 | 1.1.0-beta3 test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), Dell P2725HE: EDID extension block read, ELD and jack controls, hardware cursor used by KWin, gamma table checked with a warm test table; feature level 8 |
 | 1.1.0-beta3 builds | Linux 6.18.59 and Debian 13 `linux-headers-6.12.113+deb13-amd64` (cross-build, `W=1`, no warnings) |
 | 1.1.0-beta2 builds | Linux 6.18.59 and Debian 13 `linux-headers-6.12.107+deb13-amd64` (cross-build, `W=1`, no warnings); on 6.12 the audio code uses `hrtimer_init()`, on 6.18 `hrtimer_setup()` |
@@ -273,7 +276,7 @@ name shown under `/sys/bus/usb/drivers/trigger6/`) and retry after a second or t
 sudo apt install dkms build-essential linux-headers-amd64 libyuv0   # Debian 13
 sudo pacman -S --needed dkms base-devel linux-headers libyuv        # Arch (linux-lts-headers for the LTS kernel)
 
-VER=1.1.0-beta3
+VER=1.1.0-beta4
 sudo mkdir -p /usr/src/trigger6-$VER
 sudo cp -r kernel dkms.conf LICENSE README.md /usr/src/trigger6-$VER/
 sudo dkms add     -m trigger6 -v $VER
@@ -287,7 +290,7 @@ sudo modprobe trigger6
 `dkms.conf` is in the repository root (an identical copy is in `packaging/debian13/`) and is copied along as shown.
 DKMS then rebuilds the module for each newly installed kernel. Remember that matching headers must be installed.
 `trigger6.conf` sets `primary_userspace_nv12=1`, so the module uses the fast helper whenever it runs.
-Check the installed version with `modinfo -F version trigger6` (prints `1.1.0-beta3`).
+Check the installed version with `modinfo -F version trigger6` (prints `1.1.0-beta4`).
 
 ### C. Install the helper
 
@@ -432,6 +435,34 @@ Set one at load time with `modprobe trigger6 name=value`.
   and recovery from a USB transport fault (step 7, no clean way to cause one).
 
 ## Changelog
+
+### 1.1.0-beta4 (2026-11-05)
+
+Two fixes for HDMI replugs; no new features. Upgrading an existing DKMS install: run
+`dkms remove trigger6/1.1.0-beta3 --all` (or the installed version), then install `1.1.0-beta4` as in
+[section B](#b-permanent-install-with-dkms-debian-13--ubuntu--arch). The helper and its service are unchanged.
+
+**Testing status, stated plainly:** builds without warnings (`W=1`) against Linux 6.18.59 and, as a cross-build,
+against Debian 13's `linux-headers-6.12.113+deb13-amd64`. Tested on the adapter with a Dell P2725HE under KDE Plasma
+(Wayland) on Gentoo, Linux 6.18.59, per item below. Not yet run on a Debian machine; DKMS, suspend/resume and an
+Arch Linux build are planned.
+
+45. **Picture resent after an HDMI replug** (`t6_reprobe_work`). When a monitor is connected again while the
+    desktop keeps the output on (a replug fast enough that the desktop never saw the monitor go), the chip init or
+    timing switch reset the stream, and without a keepalive the monitor showed whatever the chip's frame slots held
+    until the desktop redrew: a half-garbled picture after one HDMI replug on 1.0.5. The last frame is now sent
+    again, RESET-flagged, as after event `0x10` and a fault recovery. *Tested:* five slow and two fast HDMI replugs,
+    picture clean each time. In all of them KDE switched the output off and on itself and drew a fresh picture, so
+    the resend was not needed (it counts as `keepalive_sent`); it covers a desktop that keeps the output on.
+46. **Second cursor after an HDMI replug** (`t6_cursor_resync`, `t6_crtc_atomic_enable`). With the pointer on the
+    monitor while its HDMI cable was unplugged, the old cursor came back on the monitor next to the real one on the
+    other screen, until the pointer moved onto the monitor. The commit tail used here
+    (`drm_atomic_helper_commit_tail_rpm`) skips plane updates and `atomic_flush` on an output that is off, so the
+    desktop's "cursor off" with the output switch-off never reached the driver. When an output is switched on, the
+    cursor's state is now taken from the DRM plane state, a cursor that is off gets an explicit hide (after a
+    re-init the chip's cursor state is unknown), and the gamma table is checked against the CRTC state and uploaded
+    if it changed meanwhile. *Tested:* Dell P2725HE, replugs with the pointer on the monitor and on the laptop
+    screen: one cursor each time; the debug log showed the stale "on" replaced by the plane's "off" and a hide sent.
 
 ### 1.1.0-beta3 (2026-11-05)
 
@@ -995,6 +1026,7 @@ original companion tools goes to the original author. The copyright notice
 * The user-space SIMD bridge (`trigger6_bridge.h`, `trigger6-fast`), the asynchronous two-URB USB path and the removal of per-frame copies.
 * `0.9.0-r9`: review fixes for fault recovery, probe error handling, output switch-off, suspend/resume, mode handling and the helper, plus corrected 1080p timing and volume request data.
 * `1.0.0`: init and mode-set sequence, interrupt endpoint, the adapter's own mode table and sync encoding (see [Changelog](#changelog)).
+* `1.1.0-beta4`: HDMI replug fixes (second cursor, picture resend).
 * `1.1.0-beta3`: hardware cursor, gamma table, EDID extension blocks, ELD and jack controls.
 * `1.1.0-beta2`: Debian 13 (6.12) build of the audio code confirmed.
 * `1.1.0-beta1`: HDMI audio as an ALSA sound card (beta: tested virtually, physically untested), ported from mct-linux and adapted for PipeWire.

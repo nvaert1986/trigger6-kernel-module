@@ -719,6 +719,9 @@ static const unsigned int t6_reprobe_delays_ms[] = {
 static bool t6_edid_base_block_valid(const u8 *edid);
 static void t6_cursor_work(struct work_struct *work);
 static void t6_cursor_resend(struct t6_head *head);
+static void t6_cursor_resync(struct t6_head *head);
+static bool t6_gamma_set_tables(struct t6_head *head,
+				const struct drm_property_blob *blob);
 
 static void t6_schedule_reprobe(struct t6_device *t6);
 static void t6_trip_transport_fault(struct t6_device *t6,
@@ -3385,6 +3388,7 @@ static void t6_reprobe_work(struct work_struct *work)
 	unsigned long recovery = msecs_to_jiffies(T6_FAULT_RECOVERY_DELAY_MS);
 	unsigned long fault_wait = 0;
 	unsigned int recovered = 0;
+	unsigned int reconnected = 0;
 	bool any_new_connection = false;
 	bool changed = false;
 	unsigned int idx;
@@ -3476,6 +3480,8 @@ static void t6_reprobe_work(struct work_struct *work)
 		}
 		if (was_connected && !head->connected)
 			t6->init_mask &= ~BIT(idx);
+		if (!was_connected && head->connected)
+			reconnected |= BIT(idx);
 
 		if (was_connected != head->connected ||
 		    old_width != head->width ||
@@ -3524,10 +3530,20 @@ static void t6_reprobe_work(struct work_struct *work)
 	if (changed)
 		drm_kms_helper_hotplug_event(&t6->drm);
 
+	/*
+	 * Put the picture back after a fault recovery, and after a monitor
+	 * was connected again while the desktop kept the output on: the
+	 * chip init or timing switch above reset the stream, and without a
+	 * keepalive the monitor showed whatever the chip's frame slots held
+	 * until the desktop redrew (a half-garbled picture after an HDMI
+	 * replug, seen once). The cached frame goes out RESET-flagged, as
+	 * for event 0x10.
+	 */
 	for (idx = 0; idx < t6->output_count; idx++) {
 		struct t6_head *head = t6_get_head(t6, idx);
 
-		if ((recovered & BIT(idx)) && READ_ONCE(head->crtc_active))
+		if (((recovered | reconnected) & BIT(idx)) &&
+		    READ_ONCE(head->crtc_active))
 			t6_resend_last_frame(head);
 	}
 
@@ -3831,12 +3847,25 @@ static void t6_crtc_atomic_enable(struct drm_crtc *crtc,
 				 "Monitor enable failed on output %u: %d\n",
 				 head->output_idx, ret);
 	}
+	/*
+	 * The commit tail skips atomic_flush on an output that is off, so a
+	 * GAMMA_LUT set meanwhile is only seen here.
+	 */
+	if (t6->has_gamma && t6_gamma_set_tables(head, crtc_state->gamma_lut)) {
+		int ret = t6_load_lut(t6, head);
+
+		if (ret < 0)
+			dev_warn(&t6->udev->dev,
+				 "Output %u: gamma upload failed: %d\n",
+				 head->output_idx, ret);
+	}
 	mutex_unlock(&t6->io_lock);
 	/*
-	 * Upload the cursor again after a mode set, as mct-linux does; inside
+	 * Upload the cursor again after a mode set, as mct-linux does, with
+	 * its state taken from the plane (t6_cursor_resync); inside
 	 * drm_dev_enter, so nothing is queued after unplug cancelled the work.
 	 */
-	t6_cursor_resend(head);
+	t6_cursor_resync(head);
 	drm_dev_exit(idx);
 }
 
@@ -3921,6 +3950,28 @@ static int t6_crtc_atomic_check(struct drm_crtc *crtc,
 }
 
 /*
+ * The 8-bit tables for a GAMMA_LUT (none: identity); true if they changed.
+ * io_lock held.
+ */
+static bool t6_gamma_set_tables(struct t6_head *head,
+				const struct drm_property_blob *blob)
+{
+	const struct drm_color_lut *lut = blob ? blob->data : NULL;
+	u8 t[3][256];
+	unsigned int i;
+
+	for (i = 0; i < 256; i++) {
+		t[0][i] = lut ? drm_color_lut_extract(lut[i].red, 8) : i;
+		t[1][i] = lut ? drm_color_lut_extract(lut[i].green, 8) : i;
+		t[2][i] = lut ? drm_color_lut_extract(lut[i].blue, 8) : i;
+	}
+	if (!memcmp(t, head->gamma, sizeof(t)))
+		return false;
+	memcpy(head->gamma, t, sizeof(t));
+	return true;
+}
+
+/*
  * A new GAMMA_LUT (or the legacy gamma ioctl, which DRM turns into one):
  * keep it as 8-bit tables for chip init and upload it now if the output
  * is on. No LUT means identity.
@@ -3932,22 +3983,14 @@ static void t6_crtc_atomic_flush(struct drm_crtc *crtc,
 	struct drm_crtc_state *crtc_state =
 		drm_atomic_get_new_crtc_state(state, crtc);
 	struct t6_device *t6 = head->t6;
-	const struct drm_color_lut *lut = NULL;
-	unsigned int i;
 	int idx, ret;
 
 	if (!crtc_state || !crtc_state->color_mgmt_changed || !t6->has_gamma)
 		return;
-	if (crtc_state->gamma_lut)
-		lut = crtc_state->gamma_lut->data;
 
 	mutex_lock(&t6->io_lock);
-	for (i = 0; i < 256; i++) {
-		head->gamma[0][i] = lut ? drm_color_lut_extract(lut[i].red, 8) : i;
-		head->gamma[1][i] = lut ? drm_color_lut_extract(lut[i].green, 8) : i;
-		head->gamma[2][i] = lut ? drm_color_lut_extract(lut[i].blue, 8) : i;
-	}
-	if (crtc_state->active && t6_head_runtime_connected(head) &&
+	if (t6_gamma_set_tables(head, crtc_state->gamma_lut) &&
+	    crtc_state->active && t6_head_runtime_connected(head) &&
 	    !READ_ONCE(t6->io_faulted) && drm_dev_enter(&t6->drm, &idx)) {
 		ret = t6_load_lut(t6, head);
 		if (ret < 0)
@@ -4302,9 +4345,15 @@ static void t6_cursor_work(struct work_struct *work)
 	if (on)
 		memcpy(head->cur_send, head->cur_img, T6_CUR_BYTES);
 	if (head->cur_lost) {
-		/* the chip may have lost its slots: upload again */
+		/*
+		 * The chip may have lost its slots: upload again. Whether it
+		 * shows a cursor is unknown: after an HDMI replug it showed
+		 * the old one again although it had been hidden (a second
+		 * cursor next to the one on the other screen). Count it as
+		 * visible, so a cursor that is off gets an explicit hide.
+		 */
 		memset(head->cur_cached, 0, sizeof(head->cur_cached));
-		head->cur_visible = false;
+		head->cur_visible = true;
 		head->cur_lost = false;
 		head->cur_errors = 0;
 	}
@@ -4345,6 +4394,32 @@ static void t6_cursor_resend(struct t6_head *head)
 	if (!head->cur_img)
 		return;
 	mutex_lock(&head->cur_lock);
+	head->cur_lost = true;
+	head->cur_pending = true;
+	mutex_unlock(&head->cur_lock);
+	queue_work(system_highpri_wq, &head->cur_work);
+}
+
+/*
+ * Output switched on: send the cursor again, with its state taken from the
+ * plane, not from the last update this driver saw. The commit tail skips
+ * plane updates on an output that is off (drm_atomic_helper_commit_tail_rpm),
+ * so a cursor switched off with it (the pointer left a monitor that was
+ * unplugged) still counted as on and came back next to the real one. The
+ * image is the last one seen while the output was on.
+ */
+static void t6_cursor_resync(struct t6_head *head)
+{
+	const struct drm_plane_state *ps = head->cursor_plane.state;
+
+	if (!head->cur_img)
+		return;
+	mutex_lock(&head->cur_lock);
+	head->cur_on = ps && ps->crtc == &head->crtc && ps->fb && ps->visible;
+	if (head->cur_on) {
+		head->cur_x = ps->crtc_x;
+		head->cur_y = ps->crtc_y;
+	}
 	head->cur_lost = true;
 	head->cur_pending = true;
 	mutex_unlock(&head->cur_lock);
@@ -5237,4 +5312,4 @@ MODULE_AUTHOR("Authentra / Ralph Friedman");
 MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_LICENSE("GPL");
 
-MODULE_VERSION("1.1.0-beta3");
+MODULE_VERSION("1.1.0-beta4");
