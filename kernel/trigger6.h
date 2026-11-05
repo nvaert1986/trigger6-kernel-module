@@ -295,6 +295,8 @@ struct t6_head {
 	/* Timing last sent with SET_RESOLUTION (io_lock); chip init restores it. */
 	u8 cur_timing[T6_RES_ENTRY_SIZE];
 	bool cur_timing_valid;
+	/* A different monitor's EDID was read; adopt its timing at the next init. */
+	bool edid_new;
 	enum t6_head_transport transport;
 
 	struct drm_crtc crtc;

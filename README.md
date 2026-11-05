@@ -1,4 +1,4 @@
-# MCT Trigger 6 (T6) USB display driver for Linux, release `1.0.4`
+# MCT Trigger 6 (T6) USB display driver for Linux, release `1.0.5`
 
 An out-of-tree Linux DRM/KMS kernel driver and a small user-space helper for the
 MCT "T6 USB Station" chipset, as found in the **StarTech USB32HDES** USB 3.0 to HDMI adapter.
@@ -6,7 +6,7 @@ This release reaches about **60 new frames per second at 1920x1080** on the test
 setup, with a stable USB connection.
 
 > **Status: experimental.** Tested on one adapter model (see
-> [Tested configuration](#tested-configuration)). Version 1.0.4 works on Wayland and builds on Arch Linux (kernel 7.2) and
+> [Tested configuration](#tested-configuration)). Version 1.0.5 works on Wayland and builds on Arch Linux (kernel 7.2) and
 > Debian 13 (kernel 6.12). **On Xorg, unplugging the USB adapter crashes the X server** (a bug in Xorg, reported to
 > Debian, see [Limitations](#limitations)); unplugging only the HDMI cable is fine. Use at your own risk.
 
@@ -45,6 +45,8 @@ setup, with a stable USB connection.
 | 1.0.0 start-up test | Gentoo, Linux 6.18.59 with enforced module signatures: plug-in, chip init, mode table and unplug checked against a USB capture (no monitor attached yet) |
 | 1.0.0 and 1.0.1 monitor test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), Dell P2725HE: picture, helper, mode switches, HDMI hotplug, flip-done events and `keepalive_ms=0`, checked against `t6_metrics` and a USB capture |
 | 1.0.3 monitor test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), seven monitors from three brands: each detected on plug-in, set to its native mode, clean picture, no errors |
+| 1.0.5 monitor swap test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland): HP E233, iiyama PL2595W and Dell P2319H swapped on the running system; each started on its own preferred timing, no mode change by the desktop afterwards |
+| 1.0.5 builds | Linux 6.18.59 (`W=1`, no warnings); uses no kernel interfaces beyond those 1.0.0 needs, which builds on Debian 13 (6.12) and Arch Linux (7.2) |
 | 1.0.4 builds | Linux 6.18.59 (`W=1`, no warnings); uses no kernel interfaces beyond those 1.0.0 needs, which builds on Debian 13 (6.12) and Arch Linux (7.2) |
 | 1.0.4 keepalive test | Same setup, `keepalive_ms=0` on six monitors (Dell P2725HE, P2319H, P2726HE, P2317H, iiyama PL2595W, HP E233): picture kept for 59 to 88 s without a single frame |
 | 1.0.4 single-output test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), Dell P2725HE: one output detected from the device information block, about 32 MB less memory, no idle USB polling, HDMI replug detected through interrupt events |
@@ -256,7 +258,7 @@ name shown under `/sys/bus/usb/drivers/trigger6/`) and retry after a second or t
 sudo apt install dkms build-essential linux-headers-amd64 libyuv0   # Debian 13
 sudo pacman -S --needed dkms base-devel linux-headers libyuv        # Arch (linux-lts-headers for the LTS kernel)
 
-VER=1.0.4
+VER=1.0.5
 sudo mkdir -p /usr/src/trigger6-$VER
 sudo cp -r kernel dkms.conf LICENSE README.md /usr/src/trigger6-$VER/
 sudo dkms add     -m trigger6 -v $VER
@@ -270,7 +272,7 @@ sudo modprobe trigger6
 `dkms.conf` is in the repository root (an identical copy is in `packaging/debian13/`) and is copied along as shown.
 DKMS then rebuilds the module for each newly installed kernel. Remember that matching headers must be installed.
 `trigger6.conf` sets `primary_userspace_nv12=1`, so the module uses the fast helper whenever it runs.
-Check the installed version with `modinfo -F version trigger6` (prints `1.0.4`).
+Check the installed version with `modinfo -F version trigger6` (prints `1.0.5`).
 
 ### C. Install the helper
 
@@ -400,6 +402,37 @@ Set one at load time with `modprobe trigger6 name=value`.
   and recovery from a USB transport fault (step 7, no clean way to cause one).
 
 ## Changelog
+
+### 1.0.5 (2026-11-05)
+
+Upgrading an existing DKMS install: run `dkms remove trigger6/1.0.4 --all`, then install `1.0.5` as in
+[section B](#b-permanent-install-with-dkms-debian-13--ubuntu--arch). The helper and its service are unchanged since
+1.0.2. Includes everything from `1.0.4` below.
+
+**Testing status, stated plainly:** builds without warnings (`W=1`) against Linux 6.18.59. Tested on the adapter
+under KDE Plasma (Wayland) on Gentoo, Linux 6.18.59, by swapping monitors on the running system:
+
+| Swap | First timing sent | Mode change by the desktop afterwards |
+|---|---|---|
+| HP E233 to iiyama PL2595W | 1920x1200 @ 60 Hz, the iiyama's own | none |
+| iiyama PL2595W to Dell P2319H | 1920x1080 @ 60 Hz, the Dell's own (1.0.4: the iiyama's 1920x1200 first) | none (1.0.4: one) |
+| Dell P2319H to iiyama PL2595W | 1920x1200 @ 60 Hz, the iiyama's own | none |
+
+Each monitor showed its picture at once, without the black moment, and switching felt quicker; the brief desktop
+freeze when connecting a monitor no longer occurred. No USB, send or unknown-event errors. Not re-tested on 1.0.5:
+plugging the same monitor back in; for an identical EDID the driver takes the 1.0.4 path (restore the last timing),
+which was tested with an HDMI replug on 1.0.4.
+
+36. **A new monitor started on the previous monitor's timing** (`t6_adopt_monitor_timing`, `t6_probe_head`,
+    chip init, `t6_reprobe_work`). Since 1.0.3 the driver restores the last programmed timing on reconnect, which
+    is right when the same monitor is plugged back in, but a different monitor first got the previous monitor's
+    timing: a 1080p Dell after the 1920x1200 iiyama received 1920x1200 and stayed black until the desktop set its
+    mode a moment later. *Fix:* the driver compares the EDID it reads on a new connection with the previous one.
+    For a different monitor (or the first one) it starts with that monitor's preferred timing, its first EDID
+    detailed timing if the adapter can show it, otherwise 1080p60, using the identical built-in or table block
+    when there is one so the desktop's mode set does not reprogram it. The same monitor plugged back in keeps the
+    last timing. When the adapter was plugged in without a monitor, the first monitor only gets a new timing if it
+    needs one (SET_RESOLUTION and enable, as a mode set). The desktop can still choose another mode afterwards.
 
 ### 1.0.4 (2026-11-05)
 
@@ -636,7 +669,7 @@ Each item below is backed by the USB capture of the vendor driver and/or static 
 * The second logical output is still allocated (about 31 MB) and polled every 5 s on single-output adapters. The
   USB ID does not say whether the board has one or two outputs, so this needs a probe-time capability check first.
 
-#### Hardware test checklist (0.9.0-r9 to 1.0.4 changes)
+#### Hardware test checklist (0.9.0-r9 to 1.0.5 changes)
 
 Result so far: fully working on Wayland; on Xorg, unplugging the USB adapter crashes the X server (see
 [Limitations](#limitations)). Confirmed on the adapter: steps 1, 2, 3 (the monitor went to standby and stayed
@@ -797,6 +830,7 @@ original companion tools goes to the original author. The copyright notice
 * The user-space SIMD bridge (`trigger6_bridge.h`, `trigger6-fast`), the asynchronous two-URB USB path and the removal of per-frame copies.
 * `0.9.0-r9`: review fixes for fault recovery, probe error handling, output switch-off, suspend/resume, mode handling and the helper, plus corrected 1080p timing and colour data.
 * `1.0.0`: init and mode-set sequence, interrupt endpoint, the adapter's own mode table and sync encoding (see [Changelog](#changelog)).
+* `1.0.5`: a different monitor starts on its own preferred timing instead of the previous monitor's.
 * `1.0.4`: only the outputs the adapter reports (request `0xB3`), so single-output adapters no longer carry a second output; event flag `0x10` resends the picture; keepalive off by default; `make load` / `make unload`.
 * `1.0.3`: the monitor's own EDID timings, built as the vendor driver builds its custom modes, so 1920x1200 monitors get their native mode.
 * `1.0.2`: the helper ends cleanly when the adapter is unplugged instead of being restarted every 2 s.

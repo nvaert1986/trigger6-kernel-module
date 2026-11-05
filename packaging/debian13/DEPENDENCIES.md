@@ -1,4 +1,4 @@
-# trigger6 1.0.4 - target: Debian 13 (trixie), kernel 6.12.x LTS
+# trigger6 1.0.5 - target: Debian 13 (trixie), kernel 6.12.x LTS
 
 ## Package `trigger6-dkms` (kernel module)
 | Dependency | Type | Notes |
@@ -60,3 +60,8 @@ Without the helper the driver falls back to in-kernel conversion (~29 fps).
 - No new dependencies. The changes use no kernel interfaces beyond those of 1.0.0.
 - Compiled against 6.18.59 (Gentoo, `W=1`, no errors or warnings).
 - Tested on the adapter under KDE Plasma (Wayland), Gentoo with kernel 6.18.59: one output detected from the device information block (request `0xB3`), about 32 MB less memory, no idle USB polling, HDMI hotplug through interrupt events, `make load` / `make unload`, and six monitors kept their picture without keepalive (new default `keepalive_ms=0`).
+
+## 1.0.5 - additional checks
+- No new dependencies. The changes use no kernel interfaces beyond those of 1.0.0.
+- Compiled against 6.18.59 (Gentoo, `W=1`, no errors or warnings).
+- Tested on the adapter under KDE Plasma (Wayland), Gentoo with kernel 6.18.59: HP E233, iiyama PL2595W and Dell P2319H swapped on the running system; each monitor started on its own preferred timing, without a mode change by the desktop afterwards.

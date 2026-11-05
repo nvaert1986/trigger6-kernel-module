@@ -1237,6 +1237,16 @@ static int t6_probe_head(struct t6_device *t6, struct t6_head *head)
 	/* Read into a local buffer: get_modes may be reading edid_data. */
 	ret = t6_ctrl_in(t6, T6_REQ_GET_EDID, 0, head->output_idx,
 			 edid, EDID_LENGTH);
+	/*
+	 * A different monitor (or the first one) must not inherit the
+	 * previous monitor's timing; the same monitor replugged keeps it.
+	 * Only this worker writes edid_data, so it can be read unlocked here.
+	 */
+	if (ret >= EDID_LENGTH && t6_edid_base_block_valid(edid))
+		head->edid_new = head->edid_len < EDID_LENGTH ||
+				 memcmp(head->edid_data, edid, EDID_LENGTH);
+	else
+		head->edid_new = head->edid_len >= EDID_LENGTH;
 	spin_lock(&head->edid_lock);
 	if (ret >= EDID_LENGTH && t6_edid_base_block_valid(edid)) {
 		memcpy(head->edid_data, edid, EDID_LENGTH);
@@ -2022,6 +2032,71 @@ static int t6_load_identity_lut(struct t6_device *t6, struct t6_head *head)
  * requests (HDMI audio off, then *on* without audio data) and committed the
  * LUT of output 0 without uploading one.
  */
+/* True if two timing blocks program the same signal (FNUM rounding aside). */
+static bool t6_timing_same(const u8 *a, const u8 *b)
+{
+	return !memcmp(a, b, 4) && !memcmp(a + 6, b + 6, 16) &&
+	       a[28] == b[28] && a[29] == b[29];
+}
+
+/*
+ * A different monitor was connected: start it on its own preferred timing
+ * (its first EDID detailed timing, if this adapter can show it) or 1080p60,
+ * not on the previous monitor's timing, which it may not be able to show
+ * (a 1080p monitor after a 1920x1200 one stayed black until the desktop
+ * set its mode). The desktop can still pick another mode afterwards.
+ * Returns true if the timing to program changed. Caller holds io_lock or
+ * runs in probe.
+ */
+static bool t6_adopt_monitor_timing(struct t6_device *t6, struct t6_head *head)
+{
+	u8 t[T6_RES_ENTRY_SIZE];
+	const u8 *blob = t6_mode_1080p;
+
+	head->edid_new = false;
+	spin_lock(&head->edid_lock);
+	if (head->edid_timing_pref && head->edid_timing_count &&
+	    t6_blob_clock(head->edid_timings[0]) <= t6_head_max_clock(head)) {
+		memcpy(t, head->edid_timings[0], sizeof(t));
+		blob = t;
+	}
+	spin_unlock(&head->edid_lock);
+
+	/*
+	 * Use the built-in or table block for the same signal, as get_modes
+	 * and atomic_enable do, so the desktop's mode set finds it unchanged.
+	 */
+	if (blob == t) {
+		unsigned int i;
+
+		for (i = 0; i < t6_builtin_mode_count; i++)
+			if (t6_timing_same(t6_builtin_modes[i].blob, t)) {
+				blob = t6_builtin_modes[i].blob;
+				break;
+			}
+		for (i = 0; blob == t && head->mode_table &&
+			    i < head->mode_count; i++)
+			if (t6_timing_same(head->mode_table +
+					   i * T6_RES_ENTRY_SIZE, t))
+				blob = head->mode_table + i * T6_RES_ENTRY_SIZE;
+	}
+
+	if (head->cur_timing_valid && t6_timing_same(blob, head->cur_timing))
+		return false;
+	mutex_lock(&t6->tx_lock);
+	head->width = t6_blob_u16(blob, 8);
+	head->height = t6_blob_u16(blob, 16);
+	head->refresh = t6_blob_u16(blob, 4);
+	head->last_sent_valid = false;
+	mutex_unlock(&t6->tx_lock);
+	memcpy(head->cur_timing, blob, T6_RES_ENTRY_SIZE);
+	head->cur_timing_valid = true;
+	dev_info(&t6->udev->dev,
+		 "Output %u: new monitor, starting with its preferred %dx%d@%d\n",
+		 head->output_idx, head->width, head->height, head->refresh);
+	return true;
+}
+
 static int t6_chip_init(struct t6_device *t6, bool read_tables)
 {
 	bool init_head[T6_OUTPUT_COUNT] = { false };
@@ -2058,6 +2133,14 @@ static int t6_chip_init(struct t6_device *t6, bool read_tables)
 	if (read_tables)
 		for (idx = 0; idx < t6->output_count; idx++)
 			t6_read_mode_table(t6, t6_get_head(t6, idx));
+
+	for (idx = 0; idx < t6->output_count; idx++) {
+		struct t6_head *head = t6_get_head(t6, idx);
+
+		/* After the tables: the EDID timing's clock limit needs them. */
+		if (init_head[idx] && head->edid_new)
+			t6_adopt_monitor_timing(t6, head);
+	}
 
 	for (idx = 0; idx < t6->output_count; idx++) {
 		struct t6_head *head = t6_get_head(t6, idx);
@@ -3284,8 +3367,26 @@ static void t6_reprobe_work(struct work_struct *work)
 		 * state, so a replugged monitor gets a full init.
 		 */
 		if (!was_connected && head->connected &&
-		    !(t6->init_mask & BIT(idx)))
+		    !(t6->init_mask & BIT(idx))) {
 			any_new_connection = true;
+		} else if (!was_connected && head->connected &&
+			   head->edid_new &&
+			   t6_adopt_monitor_timing(t6, head)) {
+			/*
+			 * Output already programmed (no monitor at probe), but
+			 * this monitor wants another timing: switch it like a
+			 * mode set, SET_RESOLUTION and enable.
+			 */
+			ret = t6_set_resolution(t6, head, head->cur_timing);
+			if (ret >= 0)
+				ret = t6_ctrl_out(t6, T6_REQ_MONITOR_CTRL,
+						  head->output_idx, 1, NULL, 0);
+			if (ret < 0)
+				dev_warn(&t6->udev->dev,
+					 "Output %u: switching to the new monitor's timing failed: %d\n",
+					 head->output_idx, ret);
+			changed = true;
+		}
 		if (was_connected && !head->connected)
 			t6->init_mask &= ~BIT(idx);
 
@@ -4692,4 +4793,4 @@ MODULE_AUTHOR("Authentra / Ralph Friedman");
 MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_LICENSE("GPL");
 
-MODULE_VERSION("1.0.4");
+MODULE_VERSION("1.0.5");
