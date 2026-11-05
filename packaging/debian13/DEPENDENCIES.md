@@ -1,4 +1,4 @@
-# trigger6 1.1.0-beta1 - target: Debian 13 (trixie), kernel 6.12.x LTS
+# trigger6 1.1.0-beta2 - target: Debian 13 (trixie), kernel 6.12.x LTS
 
 ## Package `trigger6-dkms` (kernel module)
 | Dependency | Type | Notes |
@@ -71,3 +71,6 @@ Without the helper the driver falls back to in-kernel conversion (~29 fps).
 - HDMI audio as an ALSA sound card ("Trigger6 USB to HDMI Adapter"). No new packages; the kernel needs ALSA PCM (`CONFIG_SND_PCM`, standard in Debian). PipeWire (Debian 13 default) offers it as an extra sink.
 - Compiled against 6.18.59 (Gentoo, `W=1`, no errors or warnings). Not yet compiled against Debian 13 (kernel 6.12), where the audio code uses `hrtimer_init()` instead of `hrtimer_setup()`.
 - Tested virtually up to the USB transfers (sound card, `aplay`, PipeWire, usbmon capture); physically untested, as no monitor with speakers or an audio output was available.
+
+## 1.1.0-beta2 - additional checks
+- Cross-built against Debian 13's `linux-headers-6.12.107+deb13-amd64` with `W=1`: no errors or warnings. On 6.12 the audio code uses `hrtimer_init()` (6.12 has no `hrtimer_setup()`), vermagic `6.12.107+deb13-amd64`. Built with GCC 15 instead of Debian's GCC 14; not yet run on a Debian machine.

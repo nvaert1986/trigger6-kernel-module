@@ -12,6 +12,6 @@ endif
 ifneq ($(shell grep -c 'drm_dev_set_dma_dev' $(srctree)/include/drm/drm_device.h),0)
 ccflags-y += -DT6_HAVE_DRM_SET_DMA_DEV
 endif
-ifneq ($(shell grep -c 'void hrtimer_setup' $(srctree)/include/linux/hrtimer.h),0)
+ifneq ($(shell grep -c 'void hrtimer_setup.struct hrtimer \*timer' $(srctree)/include/linux/hrtimer.h),0)
 ccflags-y += -DT6_HAVE_HRTIMER_SETUP
 endif

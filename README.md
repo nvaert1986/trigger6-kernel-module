@@ -1,18 +1,19 @@
-# MCT Trigger 6 (T6) USB display driver for Linux, release `1.1.0-beta1`
+# MCT Trigger 6 (T6) USB display driver for Linux, release `1.1.0-beta2`
 
 An out-of-tree Linux DRM/KMS kernel driver and a small user-space helper for the
 MCT "T6 USB Station" chipset, as found in the **StarTech USB32HDES** USB 3.0 to HDMI adapter.
 This release reaches about **60 new frames per second at 1920x1080** on the tested
 setup, with a stable USB connection.
 
-> **New in 1.1.0-beta1: HDMI audio support.** The adapter now also appears as a sound card ("Trigger6 USB to HDMI
+> **New in 1.1.0 (beta): HDMI audio support.** The adapter now also appears as a sound card ("Trigger6 USB to HDMI
 > Adapter"). This is a **beta**: the audio was tested virtually (the sound card, PipeWire, the playback stream and
 > the USB transfers to the adapter were all checked) but is **physically untested**: nobody has heard it yet, as
-> none of the test monitors has speakers or an audio output. See the [1.1.0-beta1 entry](#110-beta1-2026-11-05).
+> none of the test monitors has speakers or an audio output. See the [1.1.0-beta1 entry](#110-beta1-2026-11-05);
+> 1.1.0-beta2 confirms the build on Debian 13 (kernel 6.12).
 > Feedback from a monitor or TV with speakers is welcome. The display part is unchanged from 1.0.5.
 
 > **Status: experimental.** Tested on one adapter model (see
-> [Tested configuration](#tested-configuration)). Version 1.1.0-beta1 works on Wayland and builds on Arch Linux (kernel 7.2) and
+> [Tested configuration](#tested-configuration)). Version 1.1.0-beta2 works on Wayland and builds on Arch Linux (kernel 7.2) and
 > Debian 13 (kernel 6.12). **On Xorg, unplugging the USB adapter crashes the X server** (a bug in Xorg, reported to
 > Debian, see [Limitations](#limitations)); unplugging only the HDMI cable is fine. Use at your own risk.
 
@@ -52,7 +53,7 @@ setup, with a stable USB connection.
 | 1.0.0 and 1.0.1 monitor test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), Dell P2725HE: picture, helper, mode switches, HDMI hotplug, flip-done events and `keepalive_ms=0`, checked against `t6_metrics` and a USB capture |
 | 1.0.3 monitor test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), seven monitors from three brands: each detected on plug-in, set to its native mode, clean picture, no errors |
 | 1.1.0-beta1 audio test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), PipeWire: sound card registered, playback through `aplay` and PipeWire, USB transfers checked with usbmon. **Not heard**: no monitor with speakers or audio output available |
-| 1.1.0-beta1 builds | Linux 6.18.59 (`W=1`, no warnings); not yet built on Debian 13 (6.12), where the audio code uses the older `hrtimer_init()` |
+| 1.1.0-beta2 builds | Linux 6.18.59 and Debian 13 `linux-headers-6.12.107+deb13-amd64` (cross-build, `W=1`, no warnings); on 6.12 the audio code uses `hrtimer_init()`, on 6.18 `hrtimer_setup()` |
 | 1.0.5 monitor swap test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland): HP E233, iiyama PL2595W and Dell P2319H swapped on the running system; each started on its own preferred timing, no mode change by the desktop afterwards |
 | 1.0.5 builds | Linux 6.18.59 (`W=1`, no warnings); uses no kernel interfaces beyond those 1.0.0 needs, which builds on Debian 13 (6.12) and Arch Linux (7.2) |
 | 1.0.4 builds | Linux 6.18.59 (`W=1`, no warnings); uses no kernel interfaces beyond those 1.0.0 needs, which builds on Debian 13 (6.12) and Arch Linux (7.2) |
@@ -267,7 +268,7 @@ name shown under `/sys/bus/usb/drivers/trigger6/`) and retry after a second or t
 sudo apt install dkms build-essential linux-headers-amd64 libyuv0   # Debian 13
 sudo pacman -S --needed dkms base-devel linux-headers libyuv        # Arch (linux-lts-headers for the LTS kernel)
 
-VER=1.1.0-beta1
+VER=1.1.0-beta2
 sudo mkdir -p /usr/src/trigger6-$VER
 sudo cp -r kernel dkms.conf LICENSE README.md /usr/src/trigger6-$VER/
 sudo dkms add     -m trigger6 -v $VER
@@ -281,7 +282,7 @@ sudo modprobe trigger6
 `dkms.conf` is in the repository root (an identical copy is in `packaging/debian13/`) and is copied along as shown.
 DKMS then rebuilds the module for each newly installed kernel. Remember that matching headers must be installed.
 `trigger6.conf` sets `primary_userspace_nv12=1`, so the module uses the fast helper whenever it runs.
-Check the installed version with `modinfo -F version trigger6` (prints `1.1.0-beta1`).
+Check the installed version with `modinfo -F version trigger6` (prints `1.1.0-beta2`).
 
 ### C. Install the helper
 
@@ -404,7 +405,7 @@ Set one at load time with `modprobe trigger6 name=value`.
   the monitor lists, or outside its refresh and pixel clock limits, are left out (item 28): on a 1080p monitor with a
   48-100 Hz range that removes 1920x1200, 1600x1200 and 1920x1080@30. The monitor's own detailed timings are offered
   as well, up to 1920x1200, 60 Hz and the fastest clock in the adapter's table (item 31).
-* HDMI audio (1.1.0-beta1, beta): playback only (48 kHz, 16-bit, stereo), as the adapter reports. Tested
+* HDMI audio (1.1.0 beta): playback only (48 kHz, 16-bit, stereo), as the adapter reports. Tested
   virtually up to the USB transfers on the adapter, **physically untested** (not heard): none of the test monitors
   has speakers or an audio output. The
   monitor's audio capabilities (ELD) are not passed on, as the driver reads only the first EDID block.
@@ -422,6 +423,20 @@ Set one at load time with `modprobe trigger6 name=value`.
   and recovery from a USB transport fault (step 7, no clean way to cause one).
 
 ## Changelog
+
+### 1.1.0-beta2 (2026-11-05)
+
+Still a **beta: HDMI audio is tested virtually, physically untested** (see 1.1.0-beta1 below). Upgrading an existing
+DKMS install: run `dkms remove trigger6/1.1.0-beta1 --all` (or the installed 1.0.x version), then install
+`1.1.0-beta2` as in [section B](#b-permanent-install-with-dkms-debian-13--ubuntu--arch).
+
+38. **Debian 13 (kernel 6.12) build confirmed** (`kernel/Kbuild`). Kernel 6.12 has no `hrtimer_setup()`; the audio
+    code then uses `hrtimer_init()`, chosen at build time from the kernel headers. The check now matches only
+    `hrtimer_setup()` itself, not the related `hrtimer_setup_on_stack()` and `hrtimer_setup_sleeper_on_stack()`, so a
+    backport of only one of them cannot pick the wrong path. Cross-built against Debian 13's
+    `linux-headers-6.12.107+deb13-amd64` (local GCC 15 instead of Debian's GCC 14): no warnings with `W=1`, the
+    module uses `hrtimer_init`, vermagic `6.12.107+deb13-amd64`. Not yet run on a Debian machine. 1.1.0-beta1 also
+    built correctly on 6.12, as those headers do not mention `hrtimer_setup` at all.
 
 ### 1.1.0-beta1 (2026-11-05)
 
@@ -731,7 +746,7 @@ Each item below is backed by the USB capture of the vendor driver and/or static 
 * The second logical output is still allocated (about 31 MB) and polled every 5 s on single-output adapters. The
   USB ID does not say whether the board has one or two outputs, so this needs a probe-time capability check first.
 
-#### Hardware test checklist (0.9.0-r9 to 1.1.0-beta1 changes)
+#### Hardware test checklist (0.9.0-r9 to 1.1.0-beta2 changes)
 
 Result so far: fully working on Wayland; on Xorg, unplugging the USB adapter crashes the X server (see
 [Limitations](#limitations)). Confirmed on the adapter: steps 1, 2, 3 (the monitor went to standby and stayed
@@ -896,6 +911,7 @@ original companion tools goes to the original author. The copyright notice
 * The user-space SIMD bridge (`trigger6_bridge.h`, `trigger6-fast`), the asynchronous two-URB USB path and the removal of per-frame copies.
 * `0.9.0-r9`: review fixes for fault recovery, probe error handling, output switch-off, suspend/resume, mode handling and the helper, plus corrected 1080p timing and colour data.
 * `1.0.0`: init and mode-set sequence, interrupt endpoint, the adapter's own mode table and sync encoding (see [Changelog](#changelog)).
+* `1.1.0-beta2`: Debian 13 (6.12) build of the audio code confirmed.
 * `1.1.0-beta1`: HDMI audio as an ALSA sound card (beta: tested virtually, physically untested), ported from mct-linux and adapted for PipeWire.
 * `1.0.5`: a different monitor starts on its own preferred timing instead of the previous monitor's.
 * `1.0.4`: only the outputs the adapter reports (request `0xB3`), so single-output adapters no longer carry a second output; event flag `0x10` resends the picture; keepalive off by default; `make load` / `make unload`.
