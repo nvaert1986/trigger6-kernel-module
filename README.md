@@ -8,7 +8,7 @@ setup, with a stable USB connection.
 > **New in 1.2.0 (beta): partial updates and USB 2 support.** Only what changed on screen is sent, as rectangles
 > into the hidden frame buffer followed by a flip, and an unchanged picture is not sent at all; on a USB 2 port
 > every update goes as small rectangle writes. A simulated vblank is included but **off by default** (it made the
-> desktop jerky). Partial updates are tested on the adapter (USB 3); USB 2 is not tested yet. See the
+> desktop jerky). Partial updates are tested on the adapter over USB 3 and USB 2 (USB 2: works, a bit laggy). See the
 > [1.2.0-beta1 entry](#120-beta1-2026-11-06); `partial_updates=0` gives the 1.1.0 behaviour.
 
 > **New in 1.1.0: HDMI audio, hardware cursor, gamma table, full EDID.** The adapter also appears as a sound card
@@ -61,6 +61,7 @@ setup, with a stable USB connection.
 | 1.0.3 monitor test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), seven monitors from three brands: each detected on plug-in, set to its native mode, clean picture, no errors |
 | 1.1.0-beta1 audio test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), PipeWire: sound card registered, playback through `aplay` and PipeWire, USB transfers checked with usbmon. **Not heard**: no monitor with speakers or audio output available |
 | 1.1.0-beta3 audio test (by ear) | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), PipeWire, iiyama PL2595W (2 x 2 W speakers, OSD Audio Source = HDMI): audio heard, 4532 packets with 0 underruns (`audio_fills=0`), no USB errors; ELD "PL2595W" with LPCM 2 ch 32/44.1/48 kHz 16/20/24 bit, jack plugged; after an HDMI replug during playback the audio came back by itself (engine restarted, still 0 underruns) |
+| 1.2.0-beta1 USB 2 test | Debian 13 machine (kernel 6.12.115), LXDE on Xorg, Dell P2725HE on a USB 2 port, packages `1.2.0~beta1-1`: USB 2 detected automatically ("USB 2 link" in the kernel log), every update after the first frames sent as rectangle writes (551 of 561), no errors; usable for desktop work, noticeably laggy (about 13.6 ms of USB time per update, up to 100 ms for large changes) |
 | 1.1.0 Debian 13 test | Runs and works on a Debian 13 machine (kernel 6.12), including the udev rule and the systemd user service |
 | 1.1.0 Arch Linux test | Installed with DKMS and automatic module signing, builds without errors, works, including suspend/resume with the adapter connected |
 | 1.1.0 packages | Built and install-tested in containers: Debian 13 (`.deb`, DKMS build for 6.12.115, signed), Fedora 45 (`.rpm`, DKMS build for 7.2.15, signed), Arch Linux (`PKGBUILD`, DKMS hook build for 7.2.14); `lintian`, `rpmlint` and `namcap` without relevant findings |
@@ -218,8 +219,9 @@ Together this removed the stutter that appeared when the mouse moved.
 Early versions suffered from complete USB disconnect/re-enumerations. The root cause was **not proven**.
 These measures were taken, and the long tests then ran without a reset:
 
-* Use a USB 3.0 port directly. On USB 2 (since 1.2.0) the adapter works, but at about a tenth of the bandwidth:
-  normal desktop use is fine thanks to partial updates, full-screen motion (video, scrolling a whole page) is slow.
+* Use a USB 3.0 port directly. On USB 2 (since 1.2.0, tested) the adapter works, but at about a tenth of the
+  bandwidth: desktop use works thanks to partial updates but feels a bit laggy, and full-screen motion (video,
+  scrolling a whole page) is slow.
 * Full frames are sent. The experimental partial VRAM writes (`primary_partial_updates`) are **off** by default.
 * USB transfers follow the size the vendor's Windows code uses (`0xffc00` = 1 047 552 bytes).
 * Bulk writes are serialised per device with a mutex, have a 5 s timeout, kill the URB and queue a device reset on a timeout.
@@ -488,8 +490,9 @@ against Debian 13's `linux-headers-6.12.113+deb13-amd64`; `checkpatch` without f
 rectangle writes (mct-linux had verified them only on a 0711:5600; the vendor's Windows driver uses JPEG strips
 on the 5601). Typing, scrolling, window moves and a static desktop showed a correct picture with no errors; in one
 run 834 unchanged pictures were not sent, 360 went as rectangles (1,750 writes) and 597 whole, 2.0 GB over USB
-instead of about 5.6 GB. Switching `partial_updates` off and on at run time kept the picture correct. **Not tested:
-USB 2** (no USB 2 port at hand). The simulated vblank was tested and is off by default (item 48).
+instead of about 5.6 GB. Switching `partial_updates` off and on at run time kept the picture correct. **USB 2**
+tested on a Debian 13 machine with the `.deb` packages: detected automatically, works, a bit laggy (item 49). The
+simulated vblank was tested and is off by default (item 48).
 
 47. **Partial updates** (`t6_send_prepared_nv12`, `t6_diff_bands`, `t6_write_rect`, `t6_send_nv12_rects`), ported
     from mct-linux and fitted to this driver's frame buffer layout (three 4 MiB slots per output, a 48-byte flip
@@ -519,7 +522,12 @@ USB 2** (no USB 2 port at hand). The simulated vblank was tested and is off by d
     Mbit/s, about a tenth of USB 3) the driver now does what the vendor driver and mct-linux do there: no mode wider
     than 2048 pixels, and rectangle writes of at most 0x6400 bytes. Every update after the first frames of a stream
     goes as rectangles, also a whole picture, so desktop use only sends what changed. The kernel log names the
-    link at plug-in.
+    link at plug-in. *Tested:* Debian 13 (kernel 6.12.115, LXDE on Xorg), Dell P2725HE on a USB 2 port, installed
+    from the `1.2.0~beta1-1` packages: "USB 2 link: modes up to 2048 pixels wide, 25600-byte writes" at plug-in,
+    551 of 561 frames as rectangles (the rest are the first frames of the stream), 2,806 unchanged pictures not
+    sent, no send or USB errors. Usable for desktop work but noticeably laggy: about 283 KB and 13.6 ms of USB
+    time per update on average, up to 100 ms for a large change. That is about 21 MB/s, roughly half of what USB 2
+    can carry, because each rectangle goes as two transfers (header, then data) sent one after the other.
 
 ### 1.1.0 (2026-11-06)
 
@@ -1128,7 +1136,7 @@ original companion tools goes to the original author. The copyright notice
 * The user-space SIMD bridge (`trigger6_bridge.h`, `trigger6-fast`), the asynchronous two-URB USB path and the removal of per-frame copies.
 * `0.9.0-r9`: review fixes for fault recovery, probe error handling, output switch-off, suspend/resume, mode handling and the helper, plus corrected 1080p timing and volume request data.
 * `1.0.0`: init and mode-set sequence, interrupt endpoint, the adapter's own mode table and sync encoding (see [Changelog](#changelog)).
-* `1.2.0-beta1`: partial updates (tested), USB 2 support (untested), simulated vblank (off by default).
+* `1.2.0-beta1`: partial updates and USB 2 support (both tested), simulated vblank (off by default).
 * `1.1.0`: final release of the 1.1.0 betas; packages for Debian/Ubuntu, Fedora, Arch Linux and Gentoo.
 * `1.1.0-beta4`: HDMI replug fixes (second cursor, picture resend).
 * `1.1.0-beta3`: hardware cursor, gamma table, EDID extension blocks, ELD and jack controls.

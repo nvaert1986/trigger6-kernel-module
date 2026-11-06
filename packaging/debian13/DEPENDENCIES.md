@@ -95,4 +95,5 @@ Without the helper the driver falls back to in-kernel conversion (~29 fps).
 
 ## 1.2.0-beta1 - additional checks
 - No new packages. New kernel interfaces used: DRM vblank (`drm_vblank_init`, `drm_crtc_handle_vblank`, `drm_crtc_arm_vblank_event`) and an hrtimer per output; all present in 6.12.
-- Cross-built against Debian 13's `linux-headers-6.12.113+deb13-amd64` with `W=1`: no errors or warnings. Not yet run on the adapter.
+- Cross-built against Debian 13's `linux-headers-6.12.113+deb13-amd64` with `W=1`: no errors or warnings.
+- Run on a Debian 13 machine (kernel 6.12.115, LXDE on Xorg) from the packages `trigger6-dkms` / `trigger6-fast` `1.2.0~beta1-1`: DKMS built the module, the helper runs; the adapter on a USB 2 port was detected as such and works (a bit laggy), no errors.
