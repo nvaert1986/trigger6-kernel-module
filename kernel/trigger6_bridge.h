@@ -188,18 +188,44 @@ static int t6_register_nv12_bridge(struct t6_head *head)
 	return ret;
 }
 
-static bool t6_bridge_export(struct t6_head *head, const void *pixels, u32 stride)
+/*
+ * Copy the picture for the helper. With damage (picture coordinates) and a
+ * buffer that already holds the previous picture, only the changed
+ * rectangle is copied: the copy runs inside the commit, and a whole
+ * 1920x1080 frame (8 MB) per commit made commits miss a vblank tick.
+ */
+static bool t6_bridge_export(struct t6_head *head, const void *pixels, u32 stride,
+			     const struct drm_rect *damage)
 {
 	struct t6_device *t6 = head->t6;
 	bool alive;
 	int ret, idx;
-	if (!atomic_read(&head->bridge_open))
+	if (!atomic_read(&head->bridge_open)) {
+		/* nobody copies frames in now: the buffer falls behind */
+		WRITE_ONCE(head->fb_export_valid, false);
 		return false;
+	}
 	if (!drm_dev_enter(&t6->drm, &idx))
 		return true;
 	mutex_lock(&t6->tx_lock);
-	ret = t6_pack_xrgb8888_tight(head, pixels, stride,
-				   head->fb_export_buf, head->tx_buf_size);
+	if (damage && head->fb_export_valid &&
+	    head->fb_export_width == head->width &&
+	    head->fb_export_height == head->height) {
+		u32 row = head->width * 4, x0 = damage->x1 * 4;
+		u32 w = (damage->x2 - damage->x1) * 4;
+		int y;
+
+		for (y = damage->y1; y < damage->y2; y++)
+			memcpy(head->fb_export_buf + (size_t)y * row + x0,
+			       (const u8 *)pixels + (size_t)y * stride + x0, w);
+		atomic64_inc(&head->metrics.export_partial);
+		ret = 0;
+	} else {
+		ret = t6_pack_xrgb8888_tight(head, pixels, stride,
+					     head->fb_export_buf,
+					     head->tx_buf_size);
+	}
+	head->fb_export_valid = !ret;
 	/*
 	 * The helper owns this frame if it is blocked in read() waiting for one,
 	 * or was active within 200 ms. Only a helper that is stuck (stopped,

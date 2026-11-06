@@ -213,6 +213,20 @@ struct t6_frame_damage {
 #define T6_HS_MAX_WIDTH		2048	/* widest mode on USB 2, as the vendor's */
 #define T6_BAND_GAP		8	/* unchanged row pairs still merged */
 #define T6_MAX_BANDS		16
+/*
+ * Rectangle writes in flight: header and data of each are their own URBs,
+ * submitted without waiting (mct-linux keeps 16 transfers in flight). One
+ * endpoint processes them in order, so only the round trips go away.
+ */
+#define T6_RECT_SLOTS		8
+
+struct t6_rect_slot {
+	struct urb *urb[2];	/* rectangle header, then its data */
+	u8 *buf[2];
+	struct completion done[2];
+	u32 len[2];
+	bool busy[2];
+};
 
 struct t6_rect_header {
 	__le32 signature;	/* T6_SIG_RECT */
@@ -278,6 +292,11 @@ struct t6_head_metrics {
 	atomic64_t same_frames;		/* identical to the picture on screen */
 	atomic64_t rect_writes;
 	atomic64_t rect_bytes;
+	atomic64_t export_partial;	/* commits that copied only the damage */
+	atomic64_t commit_samples;	/* primary plane update in the commit */
+	atomic64_t commit_ns_total;
+	u64 last_commit_ns;
+	u64 max_commit_ns;
 	atomic64_t pacing_defers;
 	atomic64_t stage_samples;
 	atomic64_t stage_ns_total;
@@ -449,6 +468,8 @@ struct t6_head {
 	atomic_t fb_export_seq;
 	size_t fb_export_len;
 	u32 fb_export_width, fb_export_height;
+	/* fb_export_buf holds the whole current picture (tx_lock) */
+	bool fb_export_valid;
 	atomic_t bridge_open;
 	unsigned long bridge_heartbeat;
 	bool bridge_waiting;	/* helper is blocked in read(), waiting for a frame */
@@ -527,6 +548,10 @@ struct t6_device {
 	u8 *bulk_chunk;
 	u8 *bulk_chunk2;
 	struct urb *bulk_urb[2];
+	/* pipelined rectangle writes; without them they go one by one */
+	struct t6_rect_slot rect_slots[T6_RECT_SLOTS];
+	struct usb_anchor rect_anchor;	/* in flight, for cancelling newest first */
+	bool rect_async;
 };
 
 static inline struct t6_device *to_t6(struct drm_device *drm)

@@ -15,3 +15,7 @@ endif
 ifneq ($(shell grep -c 'void hrtimer_setup.struct hrtimer \*timer' $(srctree)/include/linux/hrtimer.h),0)
 ccflags-y += -DT6_HAVE_HRTIMER_SETUP
 endif
+# The plane's atomic_async_check has a "bool flip" argument since 6.13.
+ifeq ($(shell grep -A1 -s 'atomic_async_check..struct drm_plane' $(srctree)/include/drm/drm_modeset_helper_vtables.h | grep -c 'bool flip'),0)
+ccflags-y += -DT6_ASYNC_CHECK_NO_FLIP
+endif

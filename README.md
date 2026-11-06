@@ -1,4 +1,4 @@
-# MCT Trigger 6 (T6) USB display driver for Linux, release `1.2.0-beta1`
+# MCT Trigger 6 (T6) USB display driver for Linux, release `1.2.0-beta3`
 
 An out-of-tree Linux DRM/KMS kernel driver and a small user-space helper for the
 MCT "T6 USB Station" chipset, as found in the **StarTech USB32HDES** USB 3.0 to HDMI adapter.
@@ -7,9 +7,12 @@ setup, with a stable USB connection.
 
 > **New in 1.2.0 (beta): partial updates and USB 2 support.** Only what changed on screen is sent, as rectangles
 > into the hidden frame buffer followed by a flip, and an unchanged picture is not sent at all; on a USB 2 port
-> every update goes as small rectangle writes. A simulated vblank is included but **off by default** (it made the
-> desktop jerky). Partial updates are tested on the adapter over USB 3 and USB 2 (USB 2: works, a bit laggy). See the
-> [1.2.0-beta1 entry](#120-beta1-2026-11-06); `partial_updates=0` gives the 1.1.0 behaviour.
+> every update goes as small rectangle writes. Partial updates are tested on the adapter over USB 3 and USB 2 (USB 2:
+> works, a bit laggy). **1.2.0-beta2** makes the simulated vblank work smoothly (commits copy only what changed) and
+> supports it as an option, **off by default** (`vblank_timer=1`). **1.2.0-beta3** keeps several rectangle writes in
+> flight instead of sending them one by one, mainly for USB 2 (tested over USB 3, USB 2 not yet). See the
+> [1.2.0-beta3](#120-beta3-2026-11-06), [1.2.0-beta2](#120-beta2-2026-11-06) and [1.2.0-beta1](#120-beta1-2026-11-06)
+> entries; `partial_updates=0` gives the 1.1.0 behaviour.
 
 > **New in 1.1.0: HDMI audio, hardware cursor, gamma table, full EDID.** The adapter also appears as a sound card
 > ("Trigger6 USB to HDMI Adapter"), heard through a monitor's speakers and back by itself after an HDMI replug. The
@@ -61,6 +64,9 @@ setup, with a stable USB connection.
 | 1.0.3 monitor test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), seven monitors from three brands: each detected on plug-in, set to its native mode, clean picture, no errors |
 | 1.1.0-beta1 audio test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), PipeWire: sound card registered, playback through `aplay` and PipeWire, USB transfers checked with usbmon. **Not heard**: no monitor with speakers or audio output available |
 | 1.1.0-beta3 audio test (by ear) | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), PipeWire, iiyama PL2595W (2 x 2 W speakers, OSD Audio Source = HDMI): audio heard, 4532 packets with 0 underruns (`audio_fills=0`), no USB errors; ELD "PL2595W" with LPCM 2 ch 32/44.1/48 kHz 16/20/24 bit, jack plugged; after an HDMI replug during playback the audio came back by itself (engine restarted, still 0 underruns) |
+| 1.2.0-beta3 builds | Linux 6.18.59 and Debian 13 `linux-headers-6.12.113+deb13-amd64` (cross-build, `W=1`, no warnings) |
+| 1.2.0-beta3 USB 3 test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), Dell P2725HE, USB 3: typing and video playback with the pipelined rectangle writes, picture correct; 1,238 frames (758 as rectangles, 4,082 rectangle writes), 1,226 unchanged pictures not sent, no send, USB or short-write errors, every frame confirmed; 6.6 ms USB time per frame on average |
+| 1.2.0-beta2 vblank test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), Dell P2725HE, USB 3, `vblank_timer=1`: mouse, window moves, typing and video playback fluent, a barely noticeable bit more lag than without the timer; commits 1.5 to 4 ms (2.2 ms on average), cursor updates up to 41 per second (53 without the timer), no errors |
 | 1.2.0-beta1 USB 2 test | Debian 13 machine (kernel 6.12.115), LXDE on Xorg, Dell P2725HE on a USB 2 port, packages `1.2.0~beta1-1`: USB 2 detected automatically ("USB 2 link" in the kernel log), every update after the first frames sent as rectangle writes (551 of 561), no errors; usable for desktop work, noticeably laggy (about 13.6 ms of USB time per update, up to 100 ms for large changes) |
 | 1.1.0 Debian 13 test | Runs and works on a Debian 13 machine (kernel 6.12), including the udev rule and the systemd user service |
 | 1.1.0 Arch Linux test | Installed with DKMS and automatic module signing, builds without errors, works, including suspend/resume with the adapter connected |
@@ -311,7 +317,7 @@ name shown under `/sys/bus/usb/drivers/trigger6/`) and retry after a second or t
 sudo apt install dkms build-essential linux-headers-amd64 libyuv0   # Debian 13
 sudo pacman -S --needed dkms base-devel linux-headers libyuv        # Arch (linux-lts-headers for the LTS kernel)
 
-VER=1.2.0-beta1
+VER=1.2.0-beta3
 sudo mkdir -p /usr/src/trigger6-$VER
 sudo cp -r kernel dkms.conf LICENSE README.md /usr/src/trigger6-$VER/
 sudo dkms add     -m trigger6 -v $VER
@@ -325,7 +331,7 @@ sudo modprobe trigger6
 `dkms.conf` is in the repository root (an identical copy is in `packaging/debian13/`) and is copied along as shown.
 DKMS then rebuilds the module for each newly installed kernel. Remember that matching headers must be installed.
 `trigger6.conf` sets `primary_userspace_nv12=1`, so the module uses the fast helper whenever it runs.
-Check the installed version with `modinfo -F version trigger6` (prints `1.2.0-beta1`).
+Check the installed version with `modinfo -F version trigger6` (prints `1.2.0-beta3`).
 
 ### C. Install the helper
 
@@ -399,7 +405,7 @@ cat /sys/bus/usb/devices/*:1.0/t6_metrics        # frames, bytes, bulk errors, t
 | `primary_userspace_nv12` | `0` (set `1`) | Primary output uses NV12 with the helper bridge; kernel conversion fallback stays active |
 | `primary_nv12` | `0` | Pure in-kernel NV12 without helper (about 29 frames/s) |
 | `partial_updates` | `1` | Send only what changed in the NV12 picture (rectangles into the hidden frame buffer, then a flip) and skip unchanged pictures; `0` sends every frame whole, as in 1.1.0. Can be changed at run time |
-| `vblank_timer` | `0` | Experimental simulated vblank at the mode's refresh rate (load time only). Off by default: it made KDE Plasma run at about half the refresh rate on this adapter. `0` reports every frame as shown at once, as in 1.1.0 |
+| `vblank_timer` | `0` | Simulated vblank at the mode's refresh rate (load time only): frame pacing for the compositor, and on Xorg it lets PRIME synchronise its copies into the adapter. Supported and smooth since 1.2.0-beta2, but off by default because the cursor then updates slightly less often. `0` reports every frame as shown at once, as in 1.1.0 |
 | `primary_partial_updates` | `0` | Old experimental partial VRAM writes for the raw RGB transport only. Off for stability |
 | `frame_min_interval_ms` | `0` | Extra wait between frames (USB time still limits speed) |
 | `jpeg_quality` | `40` | Only for the JPEG path of the experimental secondary head |
@@ -422,6 +428,16 @@ Set one at load time with `modprobe trigger6 name=value`.
 * **`insmod: ... Key was rejected by service`:** the kernel only accepts signed modules; sign it (see section A).
 * **Build fails with an unknown DRM symbol:** please report the exact kernel version. The code detects `drm_atomic_commit` and `drm_dev_set_dma_dev` from the headers, but other API differences may exist.
 * **Frequent disconnects:** connect the adapter directly to a USB 3.0 port, not a hub.
+* **Xorg with LXDE: windows leave trails on the adapter's monitor after an `xrandr` change** (also with 1.0.x and
+  1.1.0; not on Wayland). The trails are in the X server's own picture (`scrot` shows them too), not in the driver.
+  LXDE's desktop, `pcmanfm --desktop`, sets up its desktop windows and wallpaper only for the monitors present when
+  it starts (`pcmanfm` 1.4.0, `src/desktop.c`: `FIXME: check if new monitor was added!`), and LXDM starts X with
+  `-background none`, so nothing repaints a monitor added afterwards. The adapter's output belongs to a second
+  display device, which X does not put into the desktop by itself, so it is usually the one added after login (by
+  `xrandr`, LXRandR or arandr). Fixes: restart the desktop after a layout change
+  (`pcmanfm --desktop-off; pcmanfm --desktop --profile LXDE &`), or set the layout before the session starts, for
+  example with the `xrandr` command in `~/.xsessionrc` on Debian instead of an autostart entry. XFCE's `xfdesktop`
+  4.20 and KDE Plasma add a desktop for a new monitor by themselves.
 * **Xorg crashes (SIGSEGV) when the USB adapter is unplugged:** this is the X server failing on the removal of a
   video device, not a kernel crash; see [Limitations](#limitations). Use a Wayland session if the adapter is
   unplugged while the desktop runs. Unplugging only the HDMI cable is safe on both.
@@ -471,6 +487,63 @@ Set one at load time with `modprobe trigger6 name=value`.
 * Not tested: recovery from a USB transport fault (step 7, no clean way to cause one).
 
 ## Changelog
+
+### 1.2.0-beta3 (2026-11-06)
+
+**Beta: faster rectangle writes, mainly for USB 2. Tested over USB 3; USB 2 not yet.** Upgrading an existing DKMS
+install: run `dkms remove trigger6/<installed version> --all`, then install `1.2.0-beta3` as in
+[section B](#b-permanent-install-with-dkms-debian-13--ubuntu--arch). The helper and its service are unchanged.
+
+**Testing status, stated plainly:** builds without warnings (`W=1`) against Linux 6.18.59 and, as a cross-build,
+against Debian 13's `linux-headers-6.12.113+deb13-amd64`; `checkpatch` without findings. Tested on the adapter
+over USB 3 (typing, video playback): picture correct, no errors, every frame confirmed (see
+[Tested configuration](#tested-configuration)). Not yet tested over USB 2, where the gain is expected.
+
+53. **Rectangle writes in flight** (`t6_send_rects_async`, `t6_rect_submit`, `t6_rect_reap`). Each rectangle write
+    is two transfers, its 32-byte header and its data, and until now each transfer waited for the previous one to
+    finish. On USB 2 those round trips left about half of the bandwidth unused (beta1: about 21 MB/s, 13.6 ms of
+    USB time per update). Now up to eight rectangle writes (16 transfers) are in flight at once, as mct-linux keeps
+    16 transfers in flight. One USB endpoint processes its transfers in the order they were submitted, so what the
+    adapter receives is unchanged; only the waiting between transfers goes away. Each slot is reused only after
+    its previous write went through, every write is through before the flip is sent, and after an error the
+    writes still in flight are cancelled newest first (`usb_kill_anchored_urbs`), so no later rectangle reaches the
+    adapter after an incomplete one. The writes hold the bulk lock throughout, so no other transfer (HDMI
+    audio) can come in between. Header and data deliberately stay separate transfers, as every other driver sends
+    them. Without the transfer buffers (out of memory at plug-in) the writes go one by one as before.
+54. **Docs:** Troubleshooting entry for trails on Xorg with LXDE after an `xrandr` change (a limitation of
+    `pcmanfm --desktop`, not of the driver).
+
+### 1.2.0-beta2 (2026-11-06)
+
+**Beta: the simulated vblank now works smoothly and is supported as an option (off by default).** Upgrading an
+existing DKMS install: run `dkms remove trigger6/<installed version> --all`, then install `1.2.0-beta2` as in
+[section B](#b-permanent-install-with-dkms-debian-13--ubuntu--arch). The helper and its service are unchanged.
+
+**Testing status, stated plainly:** builds without warnings (`W=1`) against Linux 6.18.59 and, as a cross-build,
+against Debian 13's `linux-headers-6.12.113+deb13-amd64`; `checkpatch` without findings. Tested on the adapter over
+USB 3 with `vblank_timer=1` (see [Tested configuration](#tested-configuration)): fluent, no errors. Not tested:
+`vblank_timer=1` on Xorg, and the async cursor path (used by Xorg's legacy cursor calls, not by KDE Plasma).
+
+50. **Fast commits** (`t6_plane_atomic_update`, `t6_bridge_export`). The primary plane now takes the compositor's
+    damage clips (`drm_plane_enable_fb_damage_clips`), and a commit copies only the changed rectangle into the
+    helper's buffer instead of the whole picture (8 MB at 1920x1080). A full copy is still made when that buffer
+    may be out of date (helper not running, new size, no damage information). This is what made the vblank timer
+    slip: with it, a commit has to finish before the next tick. New `t6_metrics` line `commit_avg_us`,
+    `commit_last_us`, `commit_max_us` (the primary plane update) and `export_partial` (commits that copied only the
+    damage). *Measured:* 1.5 to 4 ms per commit, 2.2 ms on average, during desktop use and video playback.
+51. **vblank timer as the kernel's own helper does it** (`t6_vblank_fn`, `t6_crtc_enable_vblank`,
+    `t6_crtc_get_vblank_timestamp`). The frame duration comes from the mode's exact timing
+    (`drm_calc_timestamping_constants`) instead of the refresh rate rounded to whole hertz; the timer is moved on
+    before the tick is handled, and the tick's time is reported from the timer's expiry, so the compositor predicts
+    its next deadline exactly (`drm_crtc_vblank_get_vblank_timeout` in newer kernels does the same). Switching the
+    timer off lets the callback stop itself instead of cancelling it under the vblank lock. Module parameter
+    `vblank_timer` stays **off by default**: smooth now, but cursor updates reached the adapter up to 41 instead of
+    53 times per second with it, a barely noticeable difference. On Xorg it can let PRIME synchronise its copies
+    (the X log otherwise says "falling back to unsynchronized pixmap sharing").
+52. **Async cursor moves** (`t6_cursor_atomic_async_check`, `t6_cursor_atomic_async_update`), from mct-linux: a
+    change of the cursor's position only (legacy cursor calls, as Xorg makes them) is applied at once instead of in
+    a commit that waits for the previous commit's vblank. `kernel/Kbuild` detects whether the kernel's
+    `atomic_async_check` has the `flip` argument (6.13 and later).
 
 ### 1.2.0-beta1 (2026-11-06)
 
@@ -1136,6 +1209,8 @@ original companion tools goes to the original author. The copyright notice
 * The user-space SIMD bridge (`trigger6_bridge.h`, `trigger6-fast`), the asynchronous two-URB USB path and the removal of per-frame copies.
 * `0.9.0-r9`: review fixes for fault recovery, probe error handling, output switch-off, suspend/resume, mode handling and the helper, plus corrected 1080p timing and volume request data.
 * `1.0.0`: init and mode-set sequence, interrupt endpoint, the adapter's own mode table and sync encoding (see [Changelog](#changelog)).
+* `1.2.0-beta3`: rectangle writes in flight (faster partial updates, mainly on USB 2).
+* `1.2.0-beta2`: fast commits, precise vblank timer (supported, off by default), async cursor moves.
 * `1.2.0-beta1`: partial updates and USB 2 support (both tested), simulated vblank (off by default).
 * `1.1.0`: final release of the 1.1.0 betas; packages for Debian/Ubuntu, Fedora, Arch Linux and Gentoo.
 * `1.1.0-beta4`: HDMI replug fixes (second cursor, picture resend).

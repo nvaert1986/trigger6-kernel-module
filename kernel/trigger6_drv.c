@@ -38,6 +38,7 @@
 
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_color_mgmt.h>
+#include <drm/drm_damage_helper.h>
 #include <drm/drm_vblank.h>
 #include <drm/drm_drv.h>
 #include <drm/drm_edid.h>
@@ -97,14 +98,17 @@ MODULE_PARM_DESC(partial_updates,
 
 /*
  * DRM vblank events from a timer at the refresh rate, read at probe. Off by
- * default: a commit here copies the whole picture for the helper, so it
- * often misses the next tick, and KDE Plasma then ran at about half the
- * refresh rate (cursor and window moves jerky, measured 2026-11-06).
+ * default. In 1.2.0-beta1 a commit copied the whole picture for the helper,
+ * often missed the next tick, and KDE Plasma ran at about half the refresh
+ * rate. Since beta2 a commit copies only the damage and the timer reports
+ * exact tick times: smooth, but the cursor updates slightly less often than
+ * without vblank (up to 41 instead of 53 per second, measured 2026-11-06),
+ * so it stays opt-in. On Xorg it lets PRIME synchronise its copies.
  */
 static bool t6_vblank_timer;
 module_param_named(vblank_timer, t6_vblank_timer, bool, 0444);
 MODULE_PARM_DESC(vblank_timer,
-		 "Experimental: simulated vblank at the mode's refresh rate; 0 reports every frame as shown at once (default: false)");
+		 "Simulated vblank at the mode's refresh rate (frame pacing; lets Xorg synchronise PRIME copies); 0 reports every frame as shown at once (default: false)");
 
 static bool t6_primary_partial_updates;
 module_param_named(primary_partial_updates, t6_primary_partial_updates, bool, 0644);
@@ -946,6 +950,14 @@ static ssize_t t6_metrics_show(struct device *dev,
 			(long long)atomic64_read(&head->metrics.rect_bytes),
 			t6->usb2, t6->vblank);
 		len += sysfs_emit_at(buf, len,
+			"head%u commit_avg_us=%llu commit_last_us=%llu commit_max_us=%llu export_partial=%lld\n",
+			head->output_idx,
+			div64_u64(t6_metrics_avg_ns(&head->metrics.commit_ns_total,
+						    &head->metrics.commit_samples), 1000),
+			div64_u64(READ_ONCE(head->metrics.last_commit_ns), 1000),
+			div64_u64(READ_ONCE(head->metrics.max_commit_ns), 1000),
+			(long long)atomic64_read(&head->metrics.export_partial));
+		len += sysfs_emit_at(buf, len,
 			"head%u cursor_moves=%lld cursor_uploads=%lld cursor_cache_hits=%lld gamma_uploads=%lld\n",
 			head->output_idx,
 			(long long)atomic64_read(&head->cur_moves),
@@ -1404,6 +1416,23 @@ static int t6_alloc_head_buffers(struct t6_device *t6)
 	t6->bulk_urb[0] = usb_alloc_urb(0, GFP_KERNEL);
 	t6->bulk_urb[1] = usb_alloc_urb(0, GFP_KERNEL);
 	/* Missing async resources only disable the overlap, not the driver. */
+	init_usb_anchor(&t6->rect_anchor);
+	t6->rect_async = true;
+	for (idx = 0; idx < T6_RECT_SLOTS; idx++) {
+		struct t6_rect_slot *s = &t6->rect_slots[idx];
+		unsigned int i;
+
+		for (i = 0; i < 2; i++) {
+			s->urb[i] = usb_alloc_urb(0, GFP_KERNEL);
+			s->buf[i] = kmalloc(i ? T6_RECT_FRAG :
+					    sizeof(struct t6_rect_header),
+					    GFP_KERNEL);
+			init_completion(&s->done[i]);
+			s->busy[i] = false;
+			if (!s->urb[i] || !s->buf[i])
+				t6->rect_async = false;
+		}
+	}
 
 	for (idx = 0; idx < t6->output_count; idx++) {
 		struct t6_head *head = t6_get_head(t6, idx);
@@ -1488,6 +1517,7 @@ static void t6_free_head_buffers(struct t6_device *t6)
 {
 	unsigned int idx, k;
 
+
 	for (idx = 0; idx < T6_OUTPUT_COUNT; idx++) {
 		struct t6_head *head = t6_get_head(t6, idx);
 
@@ -1538,6 +1568,16 @@ static void t6_free_head_buffers(struct t6_device *t6)
 	usb_free_urb(t6->bulk_urb[0]);
 	usb_free_urb(t6->bulk_urb[1]);
 	t6->bulk_urb[0] = t6->bulk_urb[1] = NULL;
+	/* nothing is in flight: every rectangle frame waits for its writes */
+	t6->rect_async = false;
+	for (idx = 0; idx < T6_RECT_SLOTS; idx++) {
+		for (k = 0; k < 2; k++) {
+			usb_free_urb(t6->rect_slots[idx].urb[k]);
+			kfree(t6->rect_slots[idx].buf[k]);
+			t6->rect_slots[idx].urb[k] = NULL;
+			t6->rect_slots[idx].buf[k] = NULL;
+		}
+	}
 }
 
 enum t6_tx_defer_reason {
@@ -3051,39 +3091,184 @@ static size_t t6_bands_bytes(const struct t6_band *bands, int n)
 /*
  * One rectangle write: row pairs [p, p + n) of band b of img into the slot
  * at fb_addr (image after the flip header, as t6_build_nv12_flip lays it
- * out). io_lock held.
+ * out). Fills the header and the data (2n Y rows, then n UV rows); returns
+ * the data length.
  */
-static int t6_write_rect(struct t6_device *t6, struct t6_head *head,
-			 u32 fb_addr, const u8 *img, const struct t6_band *b,
-			 int p, int n)
+static u32 t6_fill_rect(const struct t6_head *head, u32 fb_addr, const u8 *img,
+			const struct t6_band *b, int p, int n,
+			struct t6_rect_header *r, u8 *d)
 {
-	int pitch = ALIGN(head->width, 16), bw = b->x1 - b->x0, i, ret;
+	int pitch = ALIGN(head->width, 16), bw = b->x1 - b->x0, i;
 	size_t y_size = (size_t)pitch * head->height;
 	u32 base = fb_addr + sizeof(struct t6_flip_header);
-	struct t6_rect_header r = { };
-	u8 *d = head->rect_buf;
 
-	r.signature = cpu_to_le32(T6_SIG_RECT);
-	r.length = cpu_to_le32(3 * n * bw);
-	r.y_addr = cpu_to_le32(base + 2 * p * pitch + b->x0);
-	r.uv_addr = cpu_to_le32(base + y_size + p * pitch + b->x0);
-	r.y_pitch = cpu_to_le16(pitch);
-	r.uv_pitch = cpu_to_le16(pitch);
-	r.width = cpu_to_le16(bw);
-	r.height = cpu_to_le16(2 * n);
+	memset(r, 0, sizeof(*r));
+	r->signature = cpu_to_le32(T6_SIG_RECT);
+	r->length = cpu_to_le32(3 * n * bw);
+	r->y_addr = cpu_to_le32(base + 2 * p * pitch + b->x0);
+	r->uv_addr = cpu_to_le32(base + y_size + p * pitch + b->x0);
+	r->y_pitch = cpu_to_le16(pitch);
+	r->uv_pitch = cpu_to_le16(pitch);
+	r->width = cpu_to_le16(bw);
+	r->height = cpu_to_le16(2 * n);
 	for (i = 0; i < 2 * n; i++, d += bw)
 		memcpy(d, img + (size_t)(2 * p + i) * pitch + b->x0, bw);
 	for (i = 0; i < n; i++, d += bw)
 		memcpy(d, img + y_size + (size_t)(p + i) * pitch + b->x0, bw);
+	return 3 * n * bw;
+}
+
+/* One rectangle write, waiting for each transfer. io_lock held. */
+static int t6_write_rect(struct t6_device *t6, struct t6_head *head,
+			 u32 fb_addr, const u8 *img, const struct t6_band *b,
+			 int p, int n)
+{
+	struct t6_rect_header r;
+	u32 len = t6_fill_rect(head, fb_addr, img, b, p, n, &r, head->rect_buf);
+	int ret;
 
 	ret = t6_bulk_write(t6, &r, sizeof(r));
 	if (!ret)
-		ret = t6_bulk_write(t6, head->rect_buf, 3 * n * bw);
+		ret = t6_bulk_write(t6, head->rect_buf, len);
 	if (!ret) {
 		atomic64_inc(&head->metrics.rect_writes);
-		atomic64_add(sizeof(r) + 3 * n * bw, &head->metrics.rect_bytes);
+		atomic64_add(sizeof(r) + len, &head->metrics.rect_bytes);
 	}
 	return ret;
+}
+
+/* Wait for one URB of a rectangle slot; 0 or an error, as t6_bulk_reap. */
+static int t6_rect_reap(struct t6_device *t6, struct t6_rect_slot *s, int i)
+{
+	struct urb *urb = s->urb[i];
+
+	if (!s->busy[i])
+		return 0;
+	s->busy[i] = false;
+	if (!wait_for_completion_timeout(&s->done[i],
+					 msecs_to_jiffies(T6_USB_XFER_TIMEOUT_MS))) {
+		/* this write and everything queued after it, newest first */
+		usb_kill_anchored_urbs(&t6->rect_anchor);
+		wait_for_completion(&s->done[i]);
+		atomic64_inc(&t6->metrics.bulk_errors);
+		dev_err(&t6->udev->dev,
+			"USB bulk write timed out; scheduling device reset\n");
+		usb_queue_reset_device(t6->intf);
+		return -ETIMEDOUT;
+	}
+	if (urb->status) {
+		atomic64_inc(&t6->metrics.bulk_errors);
+		return urb->status;
+	}
+	if (urb->actual_length != s->len[i]) {
+		atomic64_inc(&t6->metrics.bulk_short_writes);
+		return -EIO;
+	}
+	return 0;
+}
+
+static int t6_rect_submit(struct t6_device *t6, struct t6_rect_slot *s, int i,
+			  u32 len)
+{
+	int ret;
+
+	reinit_completion(&s->done[i]);
+	usb_fill_bulk_urb(s->urb[i], t6->udev,
+			  usb_sndbulkpipe(t6->udev, T6_EP_BULK_OUT),
+			  s->buf[i], len, t6_bulk_complete, &s->done[i]);
+	s->len[i] = len;
+	usb_anchor_urb(s->urb[i], &t6->rect_anchor);
+	ret = usb_submit_urb(s->urb[i], GFP_KERNEL);
+	if (ret) {
+		usb_unanchor_urb(s->urb[i]);
+		atomic64_inc(&t6->metrics.bulk_errors);
+		return ret;
+	}
+	s->busy[i] = true;
+	atomic64_inc(&t6->metrics.bulk_chunks);
+	atomic64_add(len, &t6->metrics.bulk_bytes);
+	return 0;
+}
+
+/*
+ * All rectangle writes of the bands, up to T6_RECT_SLOTS in flight, under
+ * the bulk lock as t6_bulk_write() takes it. Each slot is reused only after
+ * its previous write went through; at the end every write is through (or,
+ * after an error, cancelled) before the caller sends the flip. Returns the
+ * bytes sent or an error. io_lock held.
+ */
+static long t6_send_rects_async(struct t6_device *t6, struct t6_head *head,
+				u32 fb_addr, const u8 *img,
+				const struct t6_band *bands, int n, int frag)
+{
+	bool serialize = READ_ONCE(t6_serialize_usb_bus);
+	unsigned int k = 0, j;
+	long sent = 0;
+	int i, x, p, rows, step, r, ret = 0;
+
+	mutex_lock(&t6->bulk_lock);
+	if (serialize)
+		mutex_lock(&t6_usb_bus_lock);
+	atomic64_inc(&t6->metrics.bulk_calls);
+	for (i = 0; i < n && !ret; i++) {
+		int bw = bands[i].x1 - bands[i].x0;
+
+		/* each write is one fragment: 2 Y rows + 1 UV row per pair */
+		step = max(frag / (3 * bw), 1);
+		for (p = bands[i].p0; p < bands[i].p1 && !ret; p += rows) {
+			struct t6_rect_slot *s =
+				&t6->rect_slots[k++ % T6_RECT_SLOTS];
+			u32 len;
+
+			rows = min(step, bands[i].p1 - p);
+			ret = t6_rect_reap(t6, s, 0);
+			r = t6_rect_reap(t6, s, 1);
+			if (!ret)
+				ret = r;
+			if (ret)
+				break;
+			len = t6_fill_rect(head, fb_addr, img, &bands[i], p,
+					   rows, (struct t6_rect_header *)s->buf[0],
+					   s->buf[1]);
+			ret = t6_rect_submit(t6, s, 0,
+					     sizeof(struct t6_rect_header));
+			if (!ret)
+				ret = t6_rect_submit(t6, s, 1, len);
+			if (!ret) {
+				sent += sizeof(struct t6_rect_header) + len;
+				atomic64_inc(&head->metrics.rect_writes);
+				atomic64_add(sizeof(struct t6_rect_header) + len,
+					     &head->metrics.rect_bytes);
+			}
+		}
+	}
+	/*
+	 * After an error, cancel what is still queued newest first: the
+	 * adapter takes transfers strictly in order, and removing an earlier
+	 * one while a later one is still queued would let that later header
+	 * through after an incomplete write. Completions are re-armed at the
+	 * next submit, so they need no reaping here.
+	 */
+	if (ret)
+		usb_kill_anchored_urbs(&t6->rect_anchor);
+	for (j = 0; j < T6_RECT_SLOTS; j++) {
+		struct t6_rect_slot *s = &t6->rect_slots[j];
+
+		for (x = 0; x < 2; x++) {
+			if (ret) {
+				s->busy[x] = false;
+				continue;
+			}
+			ret = t6_rect_reap(t6, s, x);
+			/* a failed write: cancel the rest, newest first */
+			if (ret)
+				usb_kill_anchored_urbs(&t6->rect_anchor);
+		}
+	}
+	if (serialize)
+		mutex_unlock(&t6_usb_bus_lock);
+	mutex_unlock(&t6->bulk_lock);
+	return ret ? ret : sent;
 }
 
 /*
@@ -3101,6 +3286,13 @@ static long t6_send_nv12_rects(struct t6_device *t6, struct t6_head *head,
 	long sent = 0;
 	int i, p, step, rows, ret;
 
+	if (t6->rect_async) {
+		sent = t6_send_rects_async(t6, head, fb_addr, img, bands, n,
+					   frag);
+		if (sent < 0)
+			return sent;
+		goto flip;
+	}
 	for (i = 0; i < n; i++) {
 		/* each write is one fragment: 2 Y rows + 1 UV row per pair */
 		step = max(frag / (3 * (bands[i].x1 - bands[i].x0)), 1);
@@ -3115,6 +3307,7 @@ static long t6_send_nv12_rects(struct t6_device *t6, struct t6_head *head,
 		}
 	}
 
+flip:
 	t6_build_nv12_flip(head, &fh, fb_addr, 0, fence, 0);
 	fh.payload_size = 0;
 	memset(&bch, 0, sizeof(bch));
@@ -4077,31 +4270,78 @@ static void t6_frame_work(struct work_struct *work)
 static enum hrtimer_restart t6_vblank_fn(struct hrtimer *timer)
 {
 	struct t6_head *head = container_of(timer, struct t6_head, vblank_timer);
+	ktime_t period = READ_ONCE(head->vblank_period);
 
-	if (drm_dev_is_unplugged(&head->t6->drm) ||
-	    !drm_crtc_handle_vblank(&head->crtc))
+	/* disabled (t6_crtc_disable_vblank) or unplugged: stop here */
+	if (!period || drm_dev_is_unplugged(&head->t6->drm))
 		return HRTIMER_NORESTART;
-	hrtimer_forward_now(timer, head->vblank_period);
+	/*
+	 * Move the timer on before handling the tick, as the kernel's vblank
+	 * timer (drm_vblank.c) does: t6_crtc_get_vblank_timestamp() derives
+	 * the tick's time from the next expiry.
+	 */
+	hrtimer_forward_now(timer, period);
+	if (!drm_crtc_handle_vblank(&head->crtc))
+		return HRTIMER_NORESTART;
 	return HRTIMER_RESTART;
 }
 
 static int t6_crtc_enable_vblank(struct drm_crtc *crtc)
 {
 	struct t6_head *head = t6_head_from_crtc(crtc);
-	int hz = crtc->state ? drm_mode_vrefresh(&crtc->state->adjusted_mode) : 0;
+	struct drm_vblank_crtc *vblank = drm_crtc_vblank_crtc(crtc);
 
 	if (drm_dev_is_unplugged(crtc->dev))
 		return -ENODEV;
-	head->vblank_period = ns_to_ktime(NSEC_PER_SEC / (hz > 0 ? hz : 60));
+	/* the exact frame duration of the mode, as the compositor computes it */
+	drm_calc_timestamping_constants(crtc, &crtc->mode);
+	WRITE_ONCE(head->vblank_period,
+		   ns_to_ktime(vblank->framedur_ns ?: NSEC_PER_SEC / 60));
 	hrtimer_start(&head->vblank_timer, head->vblank_period,
 		      HRTIMER_MODE_REL);
 	return 0;
 }
 
-/* Called with the vblank lock held: the callback may be waiting for it. */
+/*
+ * Called with the vblank lock held, which the callback may be waiting for:
+ * cancelling synchronously could deadlock, so the callback stops itself on
+ * its next run (same as drm_crtc_vblank_cancel_timer()).
+ */
 static void t6_crtc_disable_vblank(struct drm_crtc *crtc)
 {
-	hrtimer_try_to_cancel(&t6_head_from_crtc(crtc)->vblank_timer);
+	struct t6_head *head = t6_head_from_crtc(crtc);
+
+	WRITE_ONCE(head->vblank_period, 0);
+	hrtimer_try_to_cancel(&head->vblank_timer);
+}
+
+/*
+ * The time of the last tick: the timer's next expiry minus one period, as
+ * drm_crtc_vblank_get_vblank_timeout() computes it. The compositor predicts
+ * its next deadline from these timestamps.
+ */
+static bool t6_crtc_get_vblank_timestamp(struct drm_crtc *crtc, int *max_error,
+					 ktime_t *vblank_time, bool in_vblank_irq)
+{
+	struct t6_head *head = t6_head_from_crtc(crtc);
+	struct drm_vblank_crtc *vblank = drm_crtc_vblank_crtc(crtc);
+	ktime_t period = READ_ONCE(head->vblank_period);
+	ktime_t cur_time;
+	u64 count;
+
+	if (!READ_ONCE(vblank->enabled) || !period) {
+		*vblank_time = ktime_get();
+		return true;
+	}
+	/* a tick in between may move the expiry: reread until both agree */
+	do {
+		count = drm_crtc_vblank_count_and_time(crtc, &cur_time);
+		*vblank_time = hrtimer_get_expires(&head->vblank_timer);
+	} while (count != drm_crtc_vblank_count_and_time(crtc, &cur_time));
+	if (!ktime_compare(*vblank_time, cur_time))
+		return true;	/* already expired */
+	*vblank_time = ktime_sub(*vblank_time, period);
+	return true;
 }
 
 /* Deliver this commit's completion event at the next vblank, or now. */
@@ -4397,8 +4637,8 @@ static int t6_plane_atomic_check(struct drm_plane *plane,
 						   new_crtc_state->enable);
 }
 
-static void t6_plane_atomic_update(struct drm_plane *plane,
-				   struct t6_atomic_state *atomic_state)
+static void t6_plane_update_frame(struct drm_plane *plane,
+				  struct t6_atomic_state *atomic_state)
 {
 	struct drm_plane_state *state = drm_atomic_get_new_plane_state(atomic_state, plane);
 	struct drm_shadow_plane_state *shadow;
@@ -4498,9 +4738,30 @@ static void t6_plane_atomic_update(struct drm_plane *plane,
 		return;
 	vaddr += src_offset;
 
-	if (head->output_idx == 0 && t6_primary_userspace_nv12 &&
-	    t6_bridge_export(head, vaddr, fb->pitches[0]))
-		return;
+	if (head->output_idx == 0 && t6_primary_userspace_nv12) {
+		struct drm_plane_state *old =
+			drm_atomic_get_old_plane_state(atomic_state, plane);
+		struct drm_rect damage, *dmg = NULL;
+
+		/*
+		 * What changed since the last commit (DRM damage clips, in
+		 * framebuffer coordinates), moved to picture coordinates:
+		 * only that is copied for the helper, which keeps the commit
+		 * short. No damage information means everything changed.
+		 */
+		if (old && drm_atomic_helper_damage_merged(old, state, &damage)) {
+			struct drm_rect pic = DRM_RECT_INIT(0, 0, head->width,
+							    head->height);
+
+			drm_rect_translate(&damage, -(state->src.x1 >> 16),
+					   -(state->src.y1 >> 16));
+			if (!drm_rect_intersect(&damage, &pic))
+				damage = (struct drm_rect){ 0, 0, 0, 0 };
+			dmg = &damage;
+		}
+		if (t6_bridge_export(head, vaddr, fb->pitches[0], dmg))
+			return;
+	}
 
 	/*
 	 * Kernel 6.17 can hand us a stale old_state during drm_dev_register().
@@ -4567,6 +4828,24 @@ out_exit:
 	drm_dev_exit(idx);
 }
 
+/*
+ * The commit's share of a frame: how long the primary plane update takes.
+ * With vblank_timer=1 it decides whether a commit makes the next tick.
+ */
+static void t6_plane_atomic_update(struct drm_plane *plane,
+				   struct t6_atomic_state *atomic_state)
+{
+	struct t6_head *head = t6_head_from_plane(plane);
+	u64 start_ns = ktime_get_ns();
+
+	t6_plane_update_frame(plane, atomic_state);
+	t6_metrics_record_timing(&head->metrics.commit_samples,
+				 &head->metrics.commit_ns_total,
+				 &head->metrics.last_commit_ns,
+				 &head->metrics.max_commit_ns,
+				 ktime_get_ns() - start_ns);
+}
+
 static const struct drm_crtc_helper_funcs t6_crtc_helper_funcs = {
 	.atomic_enable = t6_crtc_atomic_enable,
 	.atomic_disable = t6_crtc_atomic_disable,
@@ -4583,6 +4862,7 @@ static const struct drm_crtc_funcs t6_crtc_funcs = {
 	.atomic_destroy_state = drm_atomic_helper_crtc_destroy_state,
 	.enable_vblank = t6_crtc_enable_vblank,
 	.disable_vblank = t6_crtc_disable_vblank,
+	.get_vblank_timestamp = t6_crtc_get_vblank_timestamp,
 };
 
 static const struct drm_plane_helper_funcs t6_plane_helper_funcs = {
@@ -4894,10 +5174,79 @@ out:
 	drm_dev_exit(idx);
 }
 
+#ifdef T6_ASYNC_CHECK_NO_FLIP
+#define T6_ASYNC_CHECK_ARGS struct drm_plane *plane, struct t6_atomic_state *state
+#define T6_ASYNC_FLIP false
+#else
+#define T6_ASYNC_CHECK_ARGS struct drm_plane *plane, struct t6_atomic_state *state, \
+	bool flip
+#define T6_ASYNC_FLIP flip
+#endif
+
+/*
+ * Cursor moves without waiting for a vblank (mct-linux): legacy cursor
+ * ioctls (Xorg) and compositors that move the cursor between frames come
+ * here instead of a commit that waits for the previous commit's event.
+ * Only a new position of the cursor already shown; anything else goes the
+ * normal way.
+ */
+static int t6_cursor_atomic_async_check(T6_ASYNC_CHECK_ARGS)
+{
+	struct drm_plane_state *new_state =
+		drm_atomic_get_new_plane_state(state, plane);
+	struct drm_plane_state *cur = plane->state;
+	struct drm_crtc_state *crtc_state;
+
+	if (T6_ASYNC_FLIP || !new_state || !new_state->crtc || !cur->fb ||
+	    !cur->visible || new_state->fb != cur->fb ||
+	    new_state->crtc != cur->crtc ||
+	    new_state->crtc_w != cur->crtc_w || new_state->crtc_h != cur->crtc_h ||
+	    new_state->src_w != cur->src_w || new_state->src_h != cur->src_h ||
+	    new_state->src_x || new_state->src_y)
+		return -EINVAL;
+	crtc_state = drm_atomic_get_new_crtc_state(state, new_state->crtc);
+	if (!crtc_state || !crtc_state->active)
+		return -EINVAL;
+	if (drm_atomic_helper_check_plane_state(new_state, crtc_state,
+						DRM_PLANE_NO_SCALING,
+						DRM_PLANE_NO_SCALING,
+						true, true) ||
+	    !new_state->visible)
+		return -EINVAL;
+	return 0;
+}
+
+static void t6_cursor_atomic_async_update(struct drm_plane *plane,
+					  struct t6_atomic_state *state)
+{
+	struct t6_head *head = t6_head_from_cursor(plane);
+	struct drm_plane_state *new_state =
+		drm_atomic_get_new_plane_state(state, plane);
+	int idx;
+
+	/* async updates change the current state in place (same framebuffer) */
+	plane->state->crtc_x = new_state->crtc_x;
+	plane->state->crtc_y = new_state->crtc_y;
+	plane->state->src = new_state->src;
+	plane->state->dst = new_state->dst;
+
+	if (!head->cur_img || !drm_dev_enter(plane->dev, &idx))
+		return;
+	mutex_lock(&head->cur_lock);
+	head->cur_x = new_state->crtc_x;
+	head->cur_y = new_state->crtc_y;
+	head->cur_pending = true;
+	mutex_unlock(&head->cur_lock);
+	queue_work(system_highpri_wq, &head->cur_work);
+	drm_dev_exit(idx);
+}
+
 static const struct drm_plane_helper_funcs t6_cursor_helper_funcs = {
 	DRM_GEM_SHADOW_PLANE_HELPER_FUNCS,
 	.atomic_check = t6_cursor_atomic_check,
 	.atomic_update = t6_cursor_atomic_update,
+	.atomic_async_check = t6_cursor_atomic_async_check,
+	.atomic_async_update = t6_cursor_atomic_async_update,
 };
 
 static const u32 t6_cursor_formats[] = { DRM_FORMAT_ARGB8888 };
@@ -5386,6 +5735,8 @@ static int t6_usb_probe(struct usb_interface *intf,
 			goto err_buffers;
 		drm_plane_helper_add(&head->primary_plane,
 				     &t6_plane_helper_funcs);
+		/* the desktop's changed areas, for the helper copy */
+		drm_plane_enable_fb_damage_clips(&head->primary_plane);
 
 		/* Cursor plane */
 		ret = t6_cursor_alloc(t6, head);
@@ -5706,4 +6057,4 @@ MODULE_AUTHOR("Authentra / Ralph Friedman");
 MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_LICENSE("GPL");
 
-MODULE_VERSION("1.2.0-beta1");
+MODULE_VERSION("1.2.0-beta3");
