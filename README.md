@@ -475,8 +475,10 @@ Set one at load time with `modprobe trigger6 name=value`.
 **Beta: partial updates and USB 2 support; the simulated vblank is off by default.** Upgrading an existing DKMS
 install: run `dkms remove trigger6/<installed version> --all`, then install `1.2.0-beta1` as in
 [section B](#b-permanent-install-with-dkms-debian-13--ubuntu--arch). For Debian 13 / Ubuntu the release page has
-`trigger6-dkms_1.2.0~beta1-1_all.deb` and `trigger6-fast_1.2.0~beta1-1_amd64.deb` (install as in
-[Packages](#packages); the `~` makes the final 1.2.0 sort higher). The helper and its service are unchanged.
+`trigger6-dkms_1.2.0.beta1-1_all.deb` and `trigger6-fast_1.2.0.beta1-1_amd64.deb` (install as in
+[Packages](#packages)). GitHub turns the `~` of the package version `1.2.0~beta1-1` into a dot in the file name;
+the version inside stays `1.2.0~beta1-1`, so the final 1.2.0 sorts higher. The helper and its service are
+unchanged.
 If the picture misbehaves, set `partial_updates=0` (also at run time, in `/sys/module/trigger6/parameters/`) to get
 the 1.1.0 behaviour back, and report it.
 
