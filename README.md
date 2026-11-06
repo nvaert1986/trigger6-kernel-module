@@ -97,6 +97,24 @@ lsusb | grep -i 0711:5601        # or: cat /sys/bus/usb/devices/*/idVendor
 
 Other T6-based adapters may work but are **not** validated. The code only binds to `0711:5601`.
 
+**Not every USB32HDES is a Trigger 6.** Some shops list the USB32HDES with a Trigger 5 chip (T5-302). That version
+uses another protocol and does not work with this driver. Check that `lsusb` shows `0711:5601` before installing.
+
+**Trying another Trigger 6 adapter (untested, at your own risk).** The vendor's Windows driver lists the Trigger 6
+chip under `0711:5600` to `0711:561F`, `0711:5650` to `0711:565F` and, for Insignia, `19FF:5600` to `19FF:560F`.
+Boards differ (VGA instead of HDMI, two outputs, USB 2 only, other HDMI transmitters), so such an adapter can stay
+black or misbehave. To try one without changing the code, load the module and add its ID as root (here `0711:5600`;
+use the ID that `lsusb` shows):
+
+```bash
+modprobe trigger6
+echo 0711 5600 > /sys/bus/usb/drivers/trigger6/new_id
+```
+
+The adapter binds at once, or at the next plug-in. The ID is forgotten at the next reboot or module reload; to stop
+earlier, unplug the adapter and run `echo 0711 5600 > /sys/bus/usb/drivers/trigger6/remove_id`. Only output 0 is
+driven by default, also on two-output boards. Reports of what works and what does not are welcome.
+
 ## Results
 
 Measured as *frames sent by the driver* while a test window changed colour at about 57 updates per
