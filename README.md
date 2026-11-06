@@ -116,7 +116,7 @@ Caveats, stated plainly:
 | `packaging/debian13/DEPENDENCIES.md` | Package dependencies and test notes for Debian 13 |
 | `packaging/deb/build-deb.sh` | Builds the Debian packages `trigger6-dkms` and `trigger6-fast`, see [Packages](#packages) |
 | `packaging/rpm/trigger6.spec` | Fedora packages `trigger6-dkms` and `trigger6-fast` |
-| `packaging/arch/PKGBUILD` | Arch Linux / AUR packages `trigger6-dkms` and `trigger6-fast` |
+| `packaging/arch/PKGBUILD` | Arch Linux packages `trigger6-dkms` and `trigger6-fast` (built for the release page) |
 | `LICENSE` | GPL-2.0-only for the kernel module and the helper; MIT notice for upstream-derived user-space tools |
 
 ## How it works
@@ -248,8 +248,10 @@ systemd user service). Install both, then plug in the adapter; the helper starts
   `sudo apt install linux-headers-amd64 ./trigger6-dkms_1.1.0-1_all.deb ./trigger6-fast_1.1.0-1_amd64.deb`.
 * **Fedora:** download the two `.rpm` files from the release page, then
   `sudo dnf install ./trigger6-dkms-1.1.0-1.fc45.noarch.rpm ./trigger6-fast-1.1.0-1.fc45.x86_64.rpm`.
-* **Arch Linux:** AUR package base `trigger6` (packages `trigger6-dkms` and `trigger6-fast`), or build
-  `packaging/arch/PKGBUILD` with `makepkg -si`. Install `linux-headers` (or the headers of your kernel).
+* **Arch Linux:** download `trigger6-dkms-1.1.0-1-any.pkg.tar.zst` and `trigger6-fast-1.1.0-1-x86_64.pkg.tar.zst`
+  from the release page, then `sudo pacman -S linux-headers` (or the headers of your kernel) and
+  `sudo pacman -U ./trigger6-dkms-1.1.0-1-any.pkg.tar.zst ./trigger6-fast-1.1.0-1-x86_64.pkg.tar.zst`. Or build
+  `packaging/arch/PKGBUILD` yourself with `makepkg -si`. There is no AUR package.
 * **Gentoo:** the overlay [trigger6-overlay](https://github.com/nvaert1986/trigger6-overlay), package
   `x11-drivers/trigger6`; see its README.
 
