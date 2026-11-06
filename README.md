@@ -9,7 +9,7 @@ setup, with a stable USB connection.
 > ("Trigger6 USB to HDMI Adapter"), heard through a monitor's speakers and back by itself after an HDMI replug. The
 > mouse pointer is drawn by the adapter (moving it no longer sends whole frames), and the monitor's full EDID and
 > audio capabilities (ELD) are passed on. Tested on Gentoo, Debian 13 and Arch Linux, including DKMS with automatic
-> module signing and suspend/resume. Packages for Debian/Ubuntu, Fedora, Arch (AUR) and Gentoo: see
+> module signing and suspend/resume. Packages for Debian/Ubuntu, Fedora, Arch Linux and Gentoo: see
 > [Packages](#packages). Details in the [1.1.0 entry](#110-2026-11-06).
 
 > **Status: experimental.** Tested on one adapter model (see
@@ -475,7 +475,7 @@ fixes (45, 46); 1.0.6 (item 39) is included.
 **Testing status, stated plainly:** tested on the adapter on Gentoo (Linux 6.18.59, KDE Plasma Wayland; display,
 audio by ear, cursor, gamma, replugs), on a Debian 13 machine (runs, udev rule and user service) and on Arch Linux
 (DKMS with automatic signing, suspend/resume). New in this release: packages for Debian/Ubuntu (`.deb`), Fedora
-(`.rpm`), Arch Linux (`PKGBUILD` for the AUR) and Gentoo (overlay), each built and install-tested in a container of
+(`.rpm`), Arch Linux (`.pkg.tar.zst`) and Gentoo (overlay), each built and install-tested in a container of
 that distribution, including the DKMS build against its kernel headers.
 
 ### 1.1.0-beta4 (2026-11-05)
