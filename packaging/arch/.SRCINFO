@@ -1,0 +1,28 @@
+pkgbase = trigger6
+	pkgdesc = Linux DRM driver for MCT Trigger 6 USB to HDMI adapters (StarTech USB32HDES)
+	pkgver = 1.1.0
+	pkgrel = 1
+	url = https://github.com/nvaert1986/trigger6-kernel-module
+	arch = x86_64
+	license = GPL-2.0-only
+	makedepends = gcc
+	makedepends = dkms
+	makedepends = libyuv
+	options = !debug
+	source = trigger6-1.1.0.tar.gz::https://github.com/nvaert1986/trigger6-kernel-module/archive/refs/tags/v1.1.0.tar.gz
+	sha256sums = e5c2755538df5895a8d2e26a925e17cd27ec6eb5e93fca0b84e971c1cf877c91
+
+pkgname = trigger6-dkms
+	pkgdesc = DRM/KMS driver for MCT Trigger 6 USB to HDMI adapters: display, cursor, gamma, HDMI audio (DKMS)
+	arch = any
+	depends = dkms
+	optdepends = linux-headers: build the module for the linux kernel
+	optdepends = linux-lts-headers: build the module for the linux-lts kernel
+	optdepends = trigger6-fast: SIMD helper for about 60 frames per second
+	backup = etc/modprobe.d/trigger6.conf
+
+pkgname = trigger6-fast
+	pkgdesc = SIMD NV12 helper, udev rule and systemd user service for the trigger6 USB display driver
+	depends = glibc
+	depends = libyuv
+	optdepends = trigger6-dkms: the kernel driver
