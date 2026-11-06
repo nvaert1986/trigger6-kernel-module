@@ -335,6 +335,9 @@ t6_connector_mode_valid_common(struct t6_head *head,
 	if (mode->hdisplay > T6_MAX_WIDTH || mode->vdisplay > T6_MAX_HEIGHT ||
 	    drm_mode_vrefresh(mode) > 60)
 		return MODE_BAD;
+	/* USB 2: no mode wider than 2048 pixels, as the vendor driver */
+	if (head->t6->usb2 && mode->hdisplay > T6_HS_MAX_WIDTH)
+		return MODE_BAD_HVALUE;
 
 	if (!t6_head_find_timing(head, mode, timing))
 		return MODE_NOMODE;

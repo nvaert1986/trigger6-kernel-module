@@ -1,4 +1,4 @@
-# trigger6 1.1.0 - target: Debian 13 (trixie), kernel 6.12.x LTS
+# trigger6 1.2.0-beta1 - target: Debian 13 (trixie), kernel 6.12.x LTS
 
 ## Package `trigger6-dkms` (kernel module)
 | Dependency | Type | Notes |
@@ -92,3 +92,7 @@ Without the helper the driver falls back to in-kernel conversion (~29 fps).
 - Runs and works on a Debian 13 machine (kernel 6.12), including the udev rule and the systemd user service.
 - Packages `trigger6-dkms` (all) and `trigger6-fast` (amd64) built with `packaging/deb/build-deb.sh` in a Debian 13 container and installed there: DKMS built and signed the module for 6.12.115+deb13.1-amd64; `lintian` reports no errors.
 - `dkms.conf` no longer has the `CLEAN` line (deprecated in DKMS 3).
+
+## 1.2.0-beta1 - additional checks
+- No new packages. New kernel interfaces used: DRM vblank (`drm_vblank_init`, `drm_crtc_handle_vblank`, `drm_crtc_arm_vblank_event`) and an hrtimer per output; all present in 6.12.
+- Cross-built against Debian 13's `linux-headers-6.12.113+deb13-amd64` with `W=1`: no errors or warnings. Not yet run on the adapter.

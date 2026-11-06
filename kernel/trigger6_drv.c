@@ -38,6 +38,7 @@
 
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_color_mgmt.h>
+#include <drm/drm_vblank.h>
 #include <drm/drm_drv.h>
 #include <drm/drm_edid.h>
 #include <drm/drm_fourcc.h>
@@ -87,6 +88,23 @@ static bool t6_primary_nv12;
 module_param_named(primary_nv12, t6_primary_nv12, bool, 0444);
 MODULE_PARM_DESC(primary_nv12,
                  "Use full-frame NV12 on primary head (4:2:0 colour; default: false)");
+
+/* Partial updates of the NV12 frames (see t6_send_prepared_nv12). */
+static bool t6_partial_updates = true;
+module_param_named(partial_updates, t6_partial_updates, bool, 0644);
+MODULE_PARM_DESC(partial_updates,
+		 "Send only what changed in the NV12 picture, as rectangles into the hidden frame buffer and a flip (default: true)");
+
+/*
+ * DRM vblank events from a timer at the refresh rate, read at probe. Off by
+ * default: a commit here copies the whole picture for the helper, so it
+ * often misses the next tick, and KDE Plasma then ran at about half the
+ * refresh rate (cursor and window moves jerky, measured 2026-11-06).
+ */
+static bool t6_vblank_timer;
+module_param_named(vblank_timer, t6_vblank_timer, bool, 0444);
+MODULE_PARM_DESC(vblank_timer,
+		 "Experimental: simulated vblank at the mode's refresh rate; 0 reports every frame as shown at once (default: false)");
 
 static bool t6_primary_partial_updates;
 module_param_named(primary_partial_updates, t6_primary_partial_updates, bool, 0644);
@@ -718,6 +736,7 @@ static const unsigned int t6_reprobe_delays_ms[] = {
 
 static bool t6_edid_base_block_valid(const u8 *edid);
 static void t6_cursor_work(struct work_struct *work);
+static enum hrtimer_restart t6_vblank_fn(struct hrtimer *timer);
 static void t6_cursor_resend(struct t6_head *head);
 static void t6_cursor_resync(struct t6_head *head);
 static bool t6_gamma_set_tables(struct t6_head *head,
@@ -918,6 +937,15 @@ static ssize_t t6_metrics_show(struct device *dev,
 			div64_u64(READ_ONCE(head->metrics.last_send_ns), 1000),
 			div64_u64(READ_ONCE(head->metrics.max_send_ns), 1000));
 		len += sysfs_emit_at(buf, len,
+			"head%u partial_updates=%u partial_frames=%lld same_frames=%lld rect_writes=%lld rect_bytes=%lld usb2=%u vblank=%u\n",
+			head->output_idx,
+			READ_ONCE(t6_partial_updates) && head->rect_buf,
+			(long long)atomic64_read(&head->metrics.partial_frames),
+			(long long)atomic64_read(&head->metrics.same_frames),
+			(long long)atomic64_read(&head->metrics.rect_writes),
+			(long long)atomic64_read(&head->metrics.rect_bytes),
+			t6->usb2, t6->vblank);
+		len += sysfs_emit_at(buf, len,
 			"head%u cursor_moves=%lld cursor_uploads=%lld cursor_cache_hits=%lld gamma_uploads=%lld\n",
 			head->output_idx,
 			(long long)atomic64_read(&head->cur_moves),
@@ -1081,6 +1109,7 @@ static void t6_cancel_head_activity(struct t6_device *t6)
 		cancel_delayed_work_sync(&head->tx_defer_work);
 		cancel_work_sync(&head->tx_work);
 		cancel_work_sync(&head->cur_work);
+		hrtimer_cancel(&head->vblank_timer);
 		WRITE_ONCE(head->keepalive_due, false);
 	}
 }
@@ -1096,6 +1125,8 @@ static void t6_reset_head_stream_state(struct t6_head *head)
 	head->frame_seq = 0;
 	head->tx_last_jiffies = 0;
 	WRITE_ONCE(head->keepalive_due, false);
+	/* chip init, fault recovery: the frame buffers' content is unknown */
+	t6_partial_forget(head);
 }
 
 static void t6_init_head_addressing(struct t6_device *t6, struct t6_head *head)
@@ -1185,6 +1216,13 @@ static void t6_head_defaults(struct t6_device *t6,
 	mutex_init(&head->cur_lock);
 	mutex_init(&head->cur_io_lock);
 	INIT_WORK(&head->cur_work, t6_cursor_work);
+#ifdef T6_HAVE_HRTIMER_SETUP
+	hrtimer_setup(&head->vblank_timer, t6_vblank_fn, CLOCK_MONOTONIC,
+		      HRTIMER_MODE_REL);
+#else
+	hrtimer_init(&head->vblank_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	head->vblank_timer.function = t6_vblank_fn;
+#endif
 	for (i = 0; i < 256; i++)
 		head->gamma[0][i] = head->gamma[1][i] = head->gamma[2][i] = i;
 	init_waitqueue_head(&head->fb_export_wq);
@@ -1405,6 +1443,24 @@ static int t6_alloc_head_buffers(struct t6_device *t6)
 				return -ENOMEM;
 		}
 
+		/* NV12 heads: copies of the frame buffer slots, partial updates */
+		if (head->transport == T6_HEAD_TRANSPORT_NV12 &&
+		    head->fb_slot_count > 1) {
+			size_t slot = (size_t)ALIGN(T6_MAX_WIDTH, 16) *
+				      T6_MAX_HEIGHT * 3 / 2;
+			unsigned int k;
+
+			head->rect_buf = kmalloc(T6_RECT_FRAG, GFP_KERNEL);
+			if (!head->rect_buf)
+				return -ENOMEM;
+			for (k = 0; k < head->fb_slot_count; k++) {
+				head->hw_copy[k] = kvmalloc(slot, GFP_KERNEL);
+				if (!head->hw_copy[k])
+					return -ENOMEM;
+			}
+			t6_partial_forget(head);
+		}
+
 		/* NV12 heads: allocate damage reference for zero-skip */
 		if (head->transport == T6_HEAD_TRANSPORT_NV12) {
 			frame_size = head->tx_buf_size;
@@ -1430,7 +1486,7 @@ static int t6_alloc_head_buffers(struct t6_device *t6)
 
 static void t6_free_head_buffers(struct t6_device *t6)
 {
-	unsigned int idx;
+	unsigned int idx, k;
 
 	for (idx = 0; idx < T6_OUTPUT_COUNT; idx++) {
 		struct t6_head *head = t6_get_head(t6, idx);
@@ -1455,6 +1511,14 @@ static void t6_free_head_buffers(struct t6_device *t6)
 		kvfree(head->jpeg_staging);
 		head->jpeg_staging = NULL;
 		head->jpeg_staging_size = 0;
+
+		for (k = 0; k < T6_JPEG_FB_SLOT_COUNT; k++) {
+			kvfree(head->hw_copy[k]);
+			head->hw_copy[k] = NULL;
+		}
+		t6_partial_forget(head);
+		kfree(head->rect_buf);
+		head->rect_buf = NULL;
 
 		kvfree(head->fb_export_buf);
 		head->fb_export_buf = NULL;
@@ -2903,6 +2967,168 @@ static void t6_build_nv12_flip(const struct t6_head *head,
 	fh->flag = flag;
 }
 
+/* ------------------------------------------------------------------
+ * Partial updates (NV12 heads)
+ * ------------------------------------------------------------------
+ *
+ * Ported from mct-linux: the host keeps a copy of what each of the three
+ * frame buffer slots holds. A frame identical to the one on screen is not
+ * sent at all; otherwise the rows that differ from the slot about to be
+ * written are sent as rectangle writes (session type 7) and an empty flip
+ * shows that slot. The picture changes in one flip, never while it is being
+ * written. A large change, a slot whose content is unknown or partial
+ * updates switched off take the full flip as before; on a USB 2 link every
+ * update goes as rectangles of at most T6_RECT_FRAG_HS bytes, the size the
+ * vendor driver uses there.
+ */
+struct t6_band {
+	int p0, p1;		/* row pairs [p0, p1) */
+	int x0, x1;		/* columns (bytes = pixels in NV12) [x0, x1) */
+};
+
+/* Widen [*lo, *hi) to the bytes in which two rows differ; false if equal. */
+static bool t6_row_diff(const u8 *a, const u8 *b, int n, int *lo, int *hi)
+{
+	int l = 0, h = n;
+
+	if (!memcmp(a, b, n))
+		return false;
+	while (l + 8 <= n && !memcmp(a + l, b + l, 8))
+		l += 8;
+	while (h - 8 >= l && !memcmp(a + h - 8, b + h - 8, 8))
+		h -= 8;
+	*lo = min(*lo, l);
+	*hi = max(*hi, h);
+	return true;
+}
+
+/*
+ * Bands of row pairs (two Y rows and their UV row) where the frame img
+ * differs from old, columns rounded out to 16 pixels; returns the count.
+ */
+static int t6_diff_bands(const struct t6_head *head, const u8 *img,
+			 const u8 *old, struct t6_band *bands)
+{
+	int w = head->width, pitch = ALIGN(w, 16), pairs = head->height / 2;
+	size_t y_size = (size_t)pitch * head->height;
+	int n = 0, p;
+
+	for (p = 0; p < pairs; p++) {
+		size_t y = (size_t)2 * p * pitch, uv = y_size + (size_t)p * pitch;
+		int lo = w, hi = 0;
+		bool d;
+
+		d = t6_row_diff(img + y, old + y, w, &lo, &hi);
+		d |= t6_row_diff(img + y + pitch, old + y + pitch, w, &lo, &hi);
+		d |= t6_row_diff(img + uv, old + uv, w, &lo, &hi);
+		if (!d)
+			continue;
+		lo = round_down(lo, 16);
+		hi = min(round_up(hi, 16), w);
+		if (n && (p - bands[n - 1].p1 <= T6_BAND_GAP || n == T6_MAX_BANDS)) {
+			bands[n - 1].p1 = p + 1;
+			bands[n - 1].x0 = min(bands[n - 1].x0, lo);
+			bands[n - 1].x1 = max(bands[n - 1].x1, hi);
+		} else {
+			bands[n++] = (struct t6_band){ p, p + 1, lo, hi };
+		}
+	}
+	return n;
+}
+
+/* Bytes the bands cost to send (2 Y rows + 1 UV row per row pair). */
+static size_t t6_bands_bytes(const struct t6_band *bands, int n)
+{
+	size_t bytes = 0;
+	int i;
+
+	for (i = 0; i < n; i++)
+		bytes += (size_t)(bands[i].p1 - bands[i].p0) * 3 *
+			 (bands[i].x1 - bands[i].x0);
+	return bytes;
+}
+
+/*
+ * One rectangle write: row pairs [p, p + n) of band b of img into the slot
+ * at fb_addr (image after the flip header, as t6_build_nv12_flip lays it
+ * out). io_lock held.
+ */
+static int t6_write_rect(struct t6_device *t6, struct t6_head *head,
+			 u32 fb_addr, const u8 *img, const struct t6_band *b,
+			 int p, int n)
+{
+	int pitch = ALIGN(head->width, 16), bw = b->x1 - b->x0, i, ret;
+	size_t y_size = (size_t)pitch * head->height;
+	u32 base = fb_addr + sizeof(struct t6_flip_header);
+	struct t6_rect_header r = { };
+	u8 *d = head->rect_buf;
+
+	r.signature = cpu_to_le32(T6_SIG_RECT);
+	r.length = cpu_to_le32(3 * n * bw);
+	r.y_addr = cpu_to_le32(base + 2 * p * pitch + b->x0);
+	r.uv_addr = cpu_to_le32(base + y_size + p * pitch + b->x0);
+	r.y_pitch = cpu_to_le16(pitch);
+	r.uv_pitch = cpu_to_le16(pitch);
+	r.width = cpu_to_le16(bw);
+	r.height = cpu_to_le16(2 * n);
+	for (i = 0; i < 2 * n; i++, d += bw)
+		memcpy(d, img + (size_t)(2 * p + i) * pitch + b->x0, bw);
+	for (i = 0; i < n; i++, d += bw)
+		memcpy(d, img + y_size + (size_t)(p + i) * pitch + b->x0, bw);
+
+	ret = t6_bulk_write(t6, &r, sizeof(r));
+	if (!ret)
+		ret = t6_bulk_write(t6, head->rect_buf, 3 * n * bw);
+	if (!ret) {
+		atomic64_inc(&head->metrics.rect_writes);
+		atomic64_add(sizeof(r) + 3 * n * bw, &head->metrics.rect_bytes);
+	}
+	return ret;
+}
+
+/*
+ * Write the bands into the slot at fb_addr, then flip to it with a flip
+ * header that carries no image data. Returns the bytes sent or an error.
+ * io_lock held.
+ */
+static long t6_send_nv12_rects(struct t6_device *t6, struct t6_head *head,
+			       u32 fb_addr, const u8 *img,
+			       const struct t6_band *bands, int n, u32 fence)
+{
+	int frag = t6->usb2 ? T6_RECT_FRAG_HS : T6_RECT_FRAG;
+	struct t6_bulk_header bch;
+	struct t6_flip_header fh;
+	long sent = 0;
+	int i, p, step, rows, ret;
+
+	for (i = 0; i < n; i++) {
+		/* each write is one fragment: 2 Y rows + 1 UV row per pair */
+		step = max(frag / (3 * (bands[i].x1 - bands[i].x0)), 1);
+		for (p = bands[i].p0; p < bands[i].p1; p += rows) {
+			rows = min(step, bands[i].p1 - p);
+			ret = t6_write_rect(t6, head, fb_addr, img, &bands[i],
+					    p, rows);
+			if (ret)
+				return ret;
+			sent += sizeof(struct t6_rect_header) +
+				3 * rows * (bands[i].x1 - bands[i].x0);
+		}
+	}
+
+	t6_build_nv12_flip(head, &fh, fb_addr, 0, fence, 0);
+	fh.payload_size = 0;
+	memset(&bch, 0, sizeof(bch));
+	bch.payload_length = cpu_to_le32(sizeof(fh));
+	bch.payload_address = cpu_to_le32(fb_addr);
+	bch.packet_length = cpu_to_le32(sizeof(fh));
+	ret = t6_bulk_write(t6, &bch, sizeof(bch));
+	if (!ret)
+		ret = t6_bulk_write(t6, &fh, sizeof(fh));
+	if (ret)
+		return ret;
+	return sent + sizeof(bch) + sizeof(fh);
+}
+
 static int t6_send_prepared_nv12(struct t6_device *t6,
 				 struct t6_head *head,
 				 size_t nv12_len)
@@ -2910,9 +3136,12 @@ static int t6_send_prepared_nv12(struct t6_device *t6,
 	struct t6_bulk_header bch;
 	struct t6_flip_header fh;
 	u32 total_payload;
+	size_t total_sent;
 	u8 fb_slot_index;
 	u32 fb_addr;
 	u64 send_start_ns = ktime_get_ns();
+	const u8 *img;
+	bool partial;
 	int ret;
 
 	total_payload = sizeof(fh) + nv12_len + T6_JPEG_PADDING_SIZE;
@@ -2926,9 +3155,65 @@ static int t6_send_prepared_nv12(struct t6_device *t6,
 	fb_addr = head->fb_slots[fb_slot_index] ?
 		  head->fb_slots[fb_slot_index] : head->fb_addr;
 
+	/*
+	 * The staging buffer always holds the whole frame with a full flip
+	 * header: the keepalive and resend paths below send it as it is.
+	 */
 	t6_build_nv12_flip(head, &fh, fb_addr, nv12_len, head->frame_seq + 1,
 			   head->frame_seq < 10 ? T6_FLAG_RESET : 0);
 	memcpy(head->jpeg_staging, &fh, sizeof(fh));
+	img = head->jpeg_staging + sizeof(fh);
+
+	/*
+	 * Partial update when the slots are tracked: not during the first
+	 * frames of a stream (RESET-flagged, as before), and only for an
+	 * image laid out as t6_build_nv12_flip describes it.
+	 */
+	partial = READ_ONCE(t6_partial_updates) && head->rect_buf &&
+		  head->hw_copy[fb_slot_index] && head->fb_slot_count > 1 &&
+		  head->frame_seq >= 10 &&
+		  nv12_len == (size_t)ALIGN(head->width, 16) * head->height * 3 / 2;
+	if (partial && (head->hw_w != head->width || head->hw_h != head->height)) {
+		t6_partial_forget(head);
+		head->hw_w = head->width;
+		head->hw_h = head->height;
+	}
+	if (partial) {
+		struct t6_band bands[T6_MAX_BANDS];
+		u8 cur = head->fb_slot_index;
+		int n = -1;
+
+		if (head->hw_valid[cur] &&
+		    !memcmp(img, head->hw_copy[cur], nv12_len)) {
+			atomic64_inc(&head->metrics.same_frames);
+			return 0;
+		}
+		if (head->hw_valid[fb_slot_index]) {
+			n = t6_diff_bands(head, img, head->hw_copy[fb_slot_index],
+					  bands);
+			/* most of the screen changed: one full flip is cheaper */
+			if (!t6->usb2 && t6_bands_bytes(bands, n) * 2 > nv12_len)
+				n = -1;
+		} else if (t6->usb2) {
+			bands[0] = (struct t6_band){ 0, head->height / 2,
+						     0, head->width };
+			n = 1;
+		}
+		if (n >= 0) {
+			long sent = t6_send_nv12_rects(t6, head, fb_addr, img,
+						       bands, n,
+						       head->frame_seq + 1);
+
+			if (sent < 0) {
+				ret = sent;
+				t6_partial_forget(head);
+				goto out;
+			}
+			total_sent = sent;
+			atomic64_inc(&head->metrics.partial_frames);
+			goto sent;
+		}
+	}
 
 	/* Single contiguous write: flip_header + NV12 data to fbAddr */
 	memset(&bch, 0, sizeof(bch));
@@ -2937,17 +3222,31 @@ static int t6_send_prepared_nv12(struct t6_device *t6,
 	bch.packet_length = cpu_to_le32(total_payload);
 
 	ret = t6_bulk_write(t6, &bch, sizeof(bch));
-	if (ret)
+	if (!ret)
+		ret = t6_bulk_write(t6, head->jpeg_staging, total_payload);
+	if (ret) {
+		t6_partial_forget(head);
 		goto out;
-	ret = t6_bulk_write(t6, head->jpeg_staging, total_payload);
-	if (ret)
-		goto out;
+	}
+	total_sent = total_payload;
 
+sent:
+	/*
+	 * The slot now holds this whole frame. Without tracking (partial
+	 * updates switched off at run time, first frames of a stream) the
+	 * copies are stale from here on.
+	 */
+	if (partial) {
+		memcpy(head->hw_copy[fb_slot_index], img, nv12_len);
+		head->hw_valid[fb_slot_index] = true;
+	} else {
+		t6_partial_forget(head);
+	}
 	head->frame_seq++;
 	head->fb_slot_index = fb_slot_index;
 	atomic64_inc(&head->metrics.sent_frames);
-	atomic64_add(total_payload, &head->metrics.sent_bytes);
-	WRITE_ONCE(head->metrics.last_payload_bytes, total_payload);
+	atomic64_add(total_sent, &head->metrics.sent_bytes);
+	WRITE_ONCE(head->metrics.last_payload_bytes, total_sent);
 	t6_metrics_record_timing(&head->metrics.usb_samples,
 				 &head->metrics.usb_ns_total,
 				 &head->metrics.last_usb_ns,
@@ -3230,6 +3529,8 @@ static void t6_resend_last_frame(struct t6_head *head)
 	 * io_lock: t6_send_prepared_nv12() swaps last_jpeg_data under it.
 	 */
 	mutex_lock(&t6->io_lock);
+	/* the device may have lost every frame buffer, not only this one */
+	t6_partial_forget(head);
 	if (head->transport == T6_HEAD_TRANSPORT_NV12 && head->last_jpeg_data &&
 	    head->last_jpeg_len >= sizeof(struct t6_flip_header))
 		((struct t6_flip_header *)head->last_jpeg_data)->flag =
@@ -3761,6 +4062,65 @@ static void t6_frame_work(struct work_struct *work)
  * ------------------------------------------------------------------
  */
 
+/* ------------------------------------------------------------------
+ * Simulated vblank
+ * ------------------------------------------------------------------
+ *
+ * The adapter has no vblank interrupt, and its flip-done event comes 0.1 to
+ * 10 ms after the data, unrelated to the monitor's refresh (mct-linux); the
+ * vendor driver uses it only to release buffers. A timer at the mode's
+ * refresh rate gives the compositor vblank events to pace its frames, as
+ * vkms does; the DRM vblank timer helpers of newer kernels do the same but
+ * are missing in 6.12. vblank_timer=0 keeps the old behaviour: every commit is
+ * reported as shown at once (no_vblank).
+ */
+static enum hrtimer_restart t6_vblank_fn(struct hrtimer *timer)
+{
+	struct t6_head *head = container_of(timer, struct t6_head, vblank_timer);
+
+	if (drm_dev_is_unplugged(&head->t6->drm) ||
+	    !drm_crtc_handle_vblank(&head->crtc))
+		return HRTIMER_NORESTART;
+	hrtimer_forward_now(timer, head->vblank_period);
+	return HRTIMER_RESTART;
+}
+
+static int t6_crtc_enable_vblank(struct drm_crtc *crtc)
+{
+	struct t6_head *head = t6_head_from_crtc(crtc);
+	int hz = crtc->state ? drm_mode_vrefresh(&crtc->state->adjusted_mode) : 0;
+
+	if (drm_dev_is_unplugged(crtc->dev))
+		return -ENODEV;
+	head->vblank_period = ns_to_ktime(NSEC_PER_SEC / (hz > 0 ? hz : 60));
+	hrtimer_start(&head->vblank_timer, head->vblank_period,
+		      HRTIMER_MODE_REL);
+	return 0;
+}
+
+/* Called with the vblank lock held: the callback may be waiting for it. */
+static void t6_crtc_disable_vblank(struct drm_crtc *crtc)
+{
+	hrtimer_try_to_cancel(&t6_head_from_crtc(crtc)->vblank_timer);
+}
+
+/* Deliver this commit's completion event at the next vblank, or now. */
+static void t6_crtc_send_event(struct drm_crtc *crtc,
+			       struct drm_crtc_state *crtc_state)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&crtc->dev->event_lock, flags);
+	if (crtc_state->event) {
+		if (crtc_state->active && !drm_crtc_vblank_get(crtc))
+			drm_crtc_arm_vblank_event(crtc, crtc_state->event);
+		else
+			drm_crtc_send_vblank_event(crtc, crtc_state->event);
+		crtc_state->event = NULL;
+	}
+	spin_unlock_irqrestore(&crtc->dev->event_lock, flags);
+}
+
 static void t6_crtc_atomic_enable(struct drm_crtc *crtc,
 				  struct t6_atomic_state *state)
 {
@@ -3780,6 +4140,8 @@ static void t6_crtc_atomic_enable(struct drm_crtc *crtc,
 	mutex_lock(&t6->io_lock);
 	head->crtc_active = true;
 	mutex_unlock(&t6->io_lock);
+	if (t6->vblank)
+		drm_crtc_vblank_on(crtc);
 
 	if (!t6_head_runtime_connected(head))
 		return;
@@ -3889,6 +4251,15 @@ static void t6_crtc_atomic_disable(struct drm_crtc *crtc,
 	mutex_lock(&t6->io_lock);
 	head->crtc_active = false;
 	mutex_unlock(&t6->io_lock);
+	if (t6->vblank) {
+		struct drm_crtc_state *crtc_state =
+			drm_atomic_get_new_crtc_state(state, crtc);
+
+		drm_crtc_vblank_off(crtc);
+		/* no flush on an output that is off: complete the commit here */
+		if (crtc_state)
+			t6_crtc_send_event(crtc, crtc_state);
+	}
 
 	cancel_delayed_work_sync(&head->boot_keepalive_work);
 	timer_delete_sync(&head->keepalive_timer);
@@ -3942,7 +4313,7 @@ static int t6_crtc_atomic_check(struct drm_crtc *crtc,
 
 	if (!crtc_state)
 		return 0;
-	crtc_state->no_vblank = true;
+	crtc_state->no_vblank = !t6_head_from_crtc(crtc)->t6->vblank;
 	if (crtc_state->gamma_lut &&
 	    drm_color_lut_size(crtc_state->gamma_lut) != 256)
 		return -EINVAL;
@@ -3985,6 +4356,8 @@ static void t6_crtc_atomic_flush(struct drm_crtc *crtc,
 	struct t6_device *t6 = head->t6;
 	int idx, ret;
 
+	if (crtc_state && t6->vblank)
+		t6_crtc_send_event(crtc, crtc_state);
 	if (!crtc_state || !crtc_state->color_mgmt_changed || !t6->has_gamma)
 		return;
 
@@ -4208,6 +4581,8 @@ static const struct drm_crtc_funcs t6_crtc_funcs = {
 	.page_flip = drm_atomic_helper_page_flip,
 	.atomic_duplicate_state = drm_atomic_helper_crtc_duplicate_state,
 	.atomic_destroy_state = drm_atomic_helper_crtc_destroy_state,
+	.enable_vblank = t6_crtc_enable_vblank,
+	.disable_vblank = t6_crtc_disable_vblank,
 };
 
 static const struct drm_plane_helper_funcs t6_plane_helper_funcs = {
@@ -4790,6 +5165,18 @@ static int t6_usb_probe(struct usb_interface *intf,
 		goto err_put;
 	}
 	dev_info(&intf->dev, "T6 RAM: %u MB\n", t6->ram_mb);
+	/*
+	 * On a USB 2 link (480 Mbit/s, about a tenth of USB 3) the vendor
+	 * driver sends smaller writes and no mode wider than 2048 pixels
+	 * (mct-linux); partial updates then carry every picture.
+	 */
+	t6->usb2 = udev->speed < USB_SPEED_SUPER;
+	if (t6->usb2)
+		dev_info(&intf->dev,
+			 "USB 2 link: modes up to %u pixels wide, %u-byte writes%s\n",
+			 T6_HS_MAX_WIDTH, T6_RECT_FRAG_HS,
+			 READ_ONCE(t6_partial_updates) ? "" :
+			 "; partial_updates=0 sends whole frames, which is slow here");
 	t6_read_device_info(t6);
 
 	/*
@@ -5055,6 +5442,13 @@ static int t6_usb_probe(struct usb_interface *intf,
 			goto err_buffers;
 	}
 
+	if (t6_vblank_timer) {
+		ret = drm_vblank_init(drm, t6->output_count);
+		if (ret)
+			goto err_buffers;
+		t6->vblank = true;
+	}
+
 	drm_mode_config_reset(drm);
 
 	for (head_idx = 0; head_idx < t6->output_count; head_idx++) {
@@ -5312,4 +5706,4 @@ MODULE_AUTHOR("Authentra / Ralph Friedman");
 MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_LICENSE("GPL");
 
-MODULE_VERSION("1.1.0");
+MODULE_VERSION("1.2.0-beta1");

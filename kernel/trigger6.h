@@ -31,6 +31,7 @@
 #include <drm/drm_crtc.h>
 #include <drm/drm_plane.h>
 #include <drm/drm_encoder.h>
+#include <linux/hrtimer.h>
 
 #define T6_JPEG_QUALITY_DEFAULT	40
 #define T6_MAX_WIDTH		1920
@@ -197,6 +198,34 @@ struct t6_frame_damage {
 /*
  * Bulk command header (32 bytes).
  */
+/*
+ * Partial updates (mct-linux, verified there on a 0711:5600): a session of
+ * type 7 writes a rectangle into adapter memory, 2n rows to the Y address
+ * and then n rows to the UV address, each "width" bytes long and "pitch"
+ * bytes apart; a flip without image data then shows the buffer. The 32-byte
+ * header replaces the usual session header. Each write stays within one
+ * fragment, as the vendor driver sends them: 0x19000 bytes, 0x6400 on a USB 2
+ * link.
+ */
+#define T6_SIG_RECT		7
+#define T6_RECT_FRAG		0x19000
+#define T6_RECT_FRAG_HS		0x6400
+#define T6_HS_MAX_WIDTH		2048	/* widest mode on USB 2, as the vendor's */
+#define T6_BAND_GAP		8	/* unchanged row pairs still merged */
+#define T6_MAX_BANDS		16
+
+struct t6_rect_header {
+	__le32 signature;	/* T6_SIG_RECT */
+	__le32 length;		/* bytes following: 3 * n * width */
+	__le32 y_addr;
+	__le32 uv_addr;
+	__le16 y_pitch;
+	__le16 uv_pitch;
+	__le16 width;		/* bytes per row */
+	__le16 height;		/* Y rows (2n) */
+	__le32 reserved[2];
+} __packed;
+
 struct t6_bulk_header {
 	__le32 signature;
 	__le32 payload_length;
@@ -245,6 +274,10 @@ struct t6_head_metrics {
 	atomic64_t keepalive_errors;
 	atomic64_t flips_done;		/* flip-done events from EP 0x83 */
 	atomic64_t transport_faults;
+	atomic64_t partial_frames;	/* sent as rectangles + empty flip */
+	atomic64_t same_frames;		/* identical to the picture on screen */
+	atomic64_t rect_writes;
+	atomic64_t rect_bytes;
 	atomic64_t pacing_defers;
 	atomic64_t stage_samples;
 	atomic64_t stage_ns_total;
@@ -299,6 +332,18 @@ struct t6_head {
 	u32 fb_slots[T6_JPEG_FB_SLOT_COUNT];
 	u8 fb_slot_count;
 	u8 fb_slot_index;
+	/*
+	 * Partial updates: what each NV12 frame buffer slot holds (pitch x
+	 * height x 3/2 at hw_w x hw_h), valid only after a whole frame went
+	 * there. io_lock.
+	 */
+	u8 *hw_copy[T6_JPEG_FB_SLOT_COUNT];
+	bool hw_valid[T6_JPEG_FB_SLOT_COUNT];
+	u16 hw_w, hw_h;
+	u8 *rect_buf;		/* one rectangle write */
+	/* Simulated vblank at the mode's refresh rate (no hardware vblank). */
+	struct hrtimer vblank_timer;
+	ktime_t vblank_period;
 	u32 cmd_base_addr;
 	u32 cmd_limit_addr;
 	u32 cmd_cursor_addr;
@@ -434,6 +479,8 @@ struct t6_device {
 	unsigned int output_count;
 	int feature_level;	/* request 0xB0 index 4, -1 if unknown */
 	bool has_gamma;		/* gamma tables (0x1C/0x1D) supported */
+	bool usb2;		/* high-speed link: smaller writes, modes <= 2048 wide */
+	bool vblank;		/* DRM vblank from a timer (vblank_timer=1 at probe) */
 	/* Mode table entries per output from request 0xB3; 0 = not known. */
 	u8 table_entries[T6_OUTPUT_COUNT];
 
@@ -491,6 +538,12 @@ static inline struct t6_head *t6_get_head(struct t6_device *t6,
 					       unsigned int idx)
 {
 	return &t6->heads[idx];
+}
+
+/* What the slots hold is unknown: chip init, a send error, a new size. */
+static inline void t6_partial_forget(struct t6_head *head)
+{
+	memset(head->hw_valid, 0, sizeof(head->hw_valid));
 }
 
 static inline struct t6_head *t6_head_from_crtc(struct drm_crtc *crtc)

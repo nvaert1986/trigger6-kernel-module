@@ -1,9 +1,15 @@
-# MCT Trigger 6 (T6) USB display driver for Linux, release `1.1.0`
+# MCT Trigger 6 (T6) USB display driver for Linux, release `1.2.0-beta1`
 
 An out-of-tree Linux DRM/KMS kernel driver and a small user-space helper for the
 MCT "T6 USB Station" chipset, as found in the **StarTech USB32HDES** USB 3.0 to HDMI adapter.
 This release reaches about **60 new frames per second at 1920x1080** on the tested
 setup, with a stable USB connection.
+
+> **New in 1.2.0 (beta): partial updates and USB 2 support.** Only what changed on screen is sent, as rectangles
+> into the hidden frame buffer followed by a flip, and an unchanged picture is not sent at all; on a USB 2 port
+> every update goes as small rectangle writes. A simulated vblank is included but **off by default** (it made the
+> desktop jerky). Partial updates are tested on the adapter (USB 3); USB 2 is not tested yet. See the
+> [1.2.0-beta1 entry](#120-beta1-2026-11-06); `partial_updates=0` gives the 1.1.0 behaviour.
 
 > **New in 1.1.0: HDMI audio, hardware cursor, gamma table, full EDID.** The adapter also appears as a sound card
 > ("Trigger6 USB to HDMI Adapter"), heard through a monitor's speakers and back by itself after an HDMI replug. The
@@ -212,7 +218,8 @@ Together this removed the stutter that appeared when the mouse moved.
 Early versions suffered from complete USB disconnect/re-enumerations. The root cause was **not proven**.
 These measures were taken, and the long tests then ran without a reset:
 
-* Use a USB 3.0 port directly. Avoid a USB 2.0 hub.
+* Use a USB 3.0 port directly. On USB 2 (since 1.2.0) the adapter works, but at about a tenth of the bandwidth:
+  normal desktop use is fine thanks to partial updates, full-screen motion (video, scrolling a whole page) is slow.
 * Full frames are sent. The experimental partial VRAM writes (`primary_partial_updates`) are **off** by default.
 * USB transfers follow the size the vendor's Windows code uses (`0xffc00` = 1 047 552 bytes).
 * Bulk writes are serialised per device with a mutex, have a 5 s timeout, kill the URB and queue a device reset on a timeout.
@@ -302,7 +309,7 @@ name shown under `/sys/bus/usb/drivers/trigger6/`) and retry after a second or t
 sudo apt install dkms build-essential linux-headers-amd64 libyuv0   # Debian 13
 sudo pacman -S --needed dkms base-devel linux-headers libyuv        # Arch (linux-lts-headers for the LTS kernel)
 
-VER=1.1.0
+VER=1.2.0-beta1
 sudo mkdir -p /usr/src/trigger6-$VER
 sudo cp -r kernel dkms.conf LICENSE README.md /usr/src/trigger6-$VER/
 sudo dkms add     -m trigger6 -v $VER
@@ -316,7 +323,7 @@ sudo modprobe trigger6
 `dkms.conf` is in the repository root (an identical copy is in `packaging/debian13/`) and is copied along as shown.
 DKMS then rebuilds the module for each newly installed kernel. Remember that matching headers must be installed.
 `trigger6.conf` sets `primary_userspace_nv12=1`, so the module uses the fast helper whenever it runs.
-Check the installed version with `modinfo -F version trigger6` (prints `1.1.0`).
+Check the installed version with `modinfo -F version trigger6` (prints `1.2.0-beta1`).
 
 ### C. Install the helper
 
@@ -389,7 +396,9 @@ cat /sys/bus/usb/devices/*:1.0/t6_metrics        # frames, bytes, bulk errors, t
 |---|---|---|
 | `primary_userspace_nv12` | `0` (set `1`) | Primary output uses NV12 with the helper bridge; kernel conversion fallback stays active |
 | `primary_nv12` | `0` | Pure in-kernel NV12 without helper (about 29 frames/s) |
-| `primary_partial_updates` | `0` | Experimental partial VRAM writes. Off for stability |
+| `partial_updates` | `1` | Send only what changed in the NV12 picture (rectangles into the hidden frame buffer, then a flip) and skip unchanged pictures; `0` sends every frame whole, as in 1.1.0. Can be changed at run time |
+| `vblank_timer` | `0` | Experimental simulated vblank at the mode's refresh rate (load time only). Off by default: it made KDE Plasma run at about half the refresh rate on this adapter. `0` reports every frame as shown at once, as in 1.1.0 |
+| `primary_partial_updates` | `0` | Old experimental partial VRAM writes for the raw RGB transport only. Off for stability |
 | `frame_min_interval_ms` | `0` | Extra wait between frames (USB time still limits speed) |
 | `jpeg_quality` | `40` | Only for the JPEG path of the experimental secondary head |
 | `experimental_secondary_raw` | `0` | Experimental second output (only on adapters that report two outputs) |
@@ -460,6 +469,55 @@ Set one at load time with `modprobe trigger6 name=value`.
 * Not tested: recovery from a USB transport fault (step 7, no clean way to cause one).
 
 ## Changelog
+
+### 1.2.0-beta1 (2026-11-06)
+
+**Beta: partial updates and USB 2 support; the simulated vblank is off by default.** Upgrading an existing DKMS
+install: run `dkms remove trigger6/<installed version> --all`, then install `1.2.0-beta1` as in
+[section B](#b-permanent-install-with-dkms-debian-13--ubuntu--arch). For Debian 13 / Ubuntu the release page has
+`trigger6-dkms_1.2.0~beta1-1_all.deb` and `trigger6-fast_1.2.0~beta1-1_amd64.deb` (install as in
+[Packages](#packages); the `~` makes the final 1.2.0 sort higher). The helper and its service are unchanged.
+If the picture misbehaves, set `partial_updates=0` (also at run time, in `/sys/module/trigger6/parameters/`) to get
+the 1.1.0 behaviour back, and report it.
+
+**Testing status, stated plainly:** builds without warnings (`W=1`) against Linux 6.18.59 and, as a cross-build,
+against Debian 13's `linux-headers-6.12.113+deb13-amd64`; `checkpatch` without findings. Tested on the adapter
+(0711:5601, USB 3) with a Dell P2725HE under KDE Plasma (Wayland), Gentoo, Linux 6.18.59: the 5601 accepts the
+rectangle writes (mct-linux had verified them only on a 0711:5600; the vendor's Windows driver uses JPEG strips
+on the 5601). Typing, scrolling, window moves and a static desktop showed a correct picture with no errors; in one
+run 834 unchanged pictures were not sent, 360 went as rectangles (1,750 writes) and 597 whole, 2.0 GB over USB
+instead of about 5.6 GB. Switching `partial_updates` off and on at run time kept the picture correct. **Not tested:
+USB 2** (no USB 2 port at hand). The simulated vblank was tested and is off by default (item 48).
+
+47. **Partial updates** (`t6_send_prepared_nv12`, `t6_diff_bands`, `t6_write_rect`, `t6_send_nv12_rects`), ported
+    from mct-linux and fitted to this driver's frame buffer layout (three 4 MiB slots per output, a 48-byte flip
+    header and then the NV12 picture with its pitch rounded up to 16). The host keeps a copy of what each slot holds.
+    A frame identical to the one on screen is not sent at all. Otherwise the row pairs that differ from the slot
+    about to be written are merged into up to 16 bands (columns rounded out to 16 pixels) and written with
+    rectangle writes (session type 7: 2n Y rows to the Y address, then n UV rows to the UV address, each write at
+    most one 0x19000-byte fragment), followed by a flip without image data; the picture changes in one flip, never
+    while it is written. When more than half of the picture changed, or the slot's content is unknown, the full
+    flip of 1.1.0 is sent instead. Chip init, fault recovery, event `0x10`, a reconnect, a send error and a new
+    mode size all mark the slot copies unknown. Both the helper and the in-kernel conversion use it; the helper
+    still converts whole frames, so the saving is USB bandwidth, not CPU time. New `t6_metrics` line:
+    `partial_updates`, `partial_frames`, `same_frames`, `rect_writes`, `rect_bytes`, `usb2`, `vblank`. Module
+    parameter `partial_updates` (default on, changeable at run time).
+48. **Simulated vblank** (`t6_vblank_fn`, `t6_crtc_enable_vblank`, `t6_crtc_send_event`). The adapter has no vblank
+    interrupt and its flip-done event is not tied to the monitor's refresh, so until now every commit was reported
+    as shown at once (`no_vblank`). A timer per output now runs at the mode's refresh rate and delivers the commit
+    events at the next tick, as the kernel's virtual display drivers do, so compositors pace their frames to the
+    refresh rate. The kernel's own vblank timer helpers are not used because 6.12 lacks them. Module parameter
+    `vblank_timer`, **off by default**: on the adapter with KDE Plasma (Wayland) the desktop on the monitor ran at
+    about half the refresh rate with it (cursor moves reaching the adapter at most ~35/s instead of ~53/s, window
+    moves jerky too). A vblank sets a hard deadline, and a commit here copies the whole picture for the helper
+    (on top of KWin's copy between the GPUs), so it often lands just after a tick and slips a whole frame;
+    mct-linux's commits copy only the changed rows. Worth revisiting once the helper converts only the damaged
+    areas.
+49. **USB 2 support** (probe, `t6_connector_mode_valid_common`, `t6_send_nv12_rects`). On a high-speed link (480
+    Mbit/s, about a tenth of USB 3) the driver now does what the vendor driver and mct-linux do there: no mode wider
+    than 2048 pixels, and rectangle writes of at most 0x6400 bytes. Every update after the first frames of a stream
+    goes as rectangles, also a whole picture, so desktop use only sends what changed. The kernel log names the
+    link at plug-in.
 
 ### 1.1.0 (2026-11-06)
 
@@ -1068,6 +1126,7 @@ original companion tools goes to the original author. The copyright notice
 * The user-space SIMD bridge (`trigger6_bridge.h`, `trigger6-fast`), the asynchronous two-URB USB path and the removal of per-frame copies.
 * `0.9.0-r9`: review fixes for fault recovery, probe error handling, output switch-off, suspend/resume, mode handling and the helper, plus corrected 1080p timing and volume request data.
 * `1.0.0`: init and mode-set sequence, interrupt endpoint, the adapter's own mode table and sync encoding (see [Changelog](#changelog)).
+* `1.2.0-beta1`: partial updates (tested), USB 2 support (untested), simulated vblank (off by default).
 * `1.1.0`: final release of the 1.1.0 betas; packages for Debian/Ubuntu, Fedora, Arch Linux and Gentoo.
 * `1.1.0-beta4`: HDMI replug fixes (second cursor, picture resend).
 * `1.1.0-beta3`: hardware cursor, gamma table, EDID extension blocks, ELD and jack controls.

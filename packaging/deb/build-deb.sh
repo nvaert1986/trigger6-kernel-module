@@ -15,6 +15,9 @@ SRC=$(cd "$1" && pwd)
 OUT=$2
 REV=${3:-1}
 VER=$(sed -n 's/^PACKAGE_VERSION="\(.*\)"/\1/p' "$SRC/dkms.conf")
+# Debian version: a pre-release like 1.2.0-beta1 becomes 1.2.0~beta1, which
+# sorts below the final 1.2.0. DKMS and /usr/src keep the module's own VER.
+DEBVER=$(printf '%s' "$VER" | tr '-' '~')
 ARCH=$(dpkg --print-architecture)
 DATE=$(date -R -d "@${SOURCE_DATE_EPOCH:-$(date +%s)}")
 WORK=$(mktemp -d)
@@ -35,7 +38,7 @@ docs() {
 		echo " On Debian systems, the full text is in /usr/share/common-licenses/GPL-2."
 	} > "$1/usr/share/doc/$2/copyright"
 	{
-		echo "$2 ($VER-$REV) unstable; urgency=medium"
+		echo "$2 ($DEBVER-$REV) unstable; urgency=medium"
 		echo
 		echo "  * Release $VER. The full changelog is in README.md of the source."
 		echo
@@ -55,7 +58,7 @@ docs "$P" trigger6-dkms
 
 cat > "$P/DEBIAN/control" <<EOF
 Package: trigger6-dkms
-Version: $VER-$REV
+Version: $DEBVER-$REV
 Architecture: all
 Maintainer: nvaert1986 <25772781+nvaert1986@users.noreply.github.com>
 Depends: dkms (>= 3.0), kmod
@@ -91,7 +94,7 @@ dkms remove -m trigger6 -v $VER --all >/dev/null 2>&1 || true
 exit 0
 EOF
 chmod 0755 "$P/DEBIAN/postinst" "$P/DEBIAN/prerm"
-dpkg-deb --root-owner-group --build "$P" "$OUT/trigger6-dkms_${VER}-${REV}_all.deb"
+dpkg-deb --root-owner-group --build "$P" "$OUT/trigger6-dkms_${DEBVER}-${REV}_all.deb"
 
 # --- trigger6-fast -----------------------------------------------------------
 P=$WORK/fast
@@ -104,7 +107,7 @@ docs "$P" trigger6-fast
 
 cat > "$P/DEBIAN/control" <<EOF
 Package: trigger6-fast
-Version: $VER-$REV
+Version: $DEBVER-$REV
 Architecture: $ARCH
 Maintainer: nvaert1986 <25772781+nvaert1986@users.noreply.github.com>
 Depends: libc6 (>= 2.34), libyuv0
@@ -128,6 +131,6 @@ fi
 exit 0
 EOF
 chmod 0755 "$P/DEBIAN/postinst"
-dpkg-deb --root-owner-group --build "$P" "$OUT/trigger6-fast_${VER}-${REV}_${ARCH}.deb"
+dpkg-deb --root-owner-group --build "$P" "$OUT/trigger6-fast_${DEBVER}-${REV}_${ARCH}.deb"
 
 ls -l "$OUT"
