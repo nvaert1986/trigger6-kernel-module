@@ -1,4 +1,4 @@
-# trigger6 1.1.0-beta4 - target: Debian 13 (trixie), kernel 6.12.x LTS
+# trigger6 1.1.0 - target: Debian 13 (trixie), kernel 6.12.x LTS
 
 ## Package `trigger6-dkms` (kernel module)
 | Dependency | Type | Notes |
@@ -87,3 +87,8 @@ Without the helper the driver falls back to in-kernel conversion (~29 fps).
 ## 1.1.0-beta4 - additional checks
 - No new packages and no new kernel interfaces (fixes for HDMI replugs only).
 - Cross-built against Debian 13's `linux-headers-6.12.113+deb13-amd64` with `W=1`: no errors or warnings. Not yet run on a Debian machine.
+
+## 1.1.0 - additional checks
+- Runs and works on a Debian 13 machine (kernel 6.12), including the udev rule and the systemd user service.
+- Packages `trigger6-dkms` (all) and `trigger6-fast` (amd64) built with `packaging/deb/build-deb.sh` in a Debian 13 container and installed there: DKMS built and signed the module for 6.12.115+deb13.1-amd64; `lintian` reports no errors.
+- `dkms.conf` no longer has the `CLEAN` line (deprecated in DKMS 3).

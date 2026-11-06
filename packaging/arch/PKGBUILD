@@ -1,0 +1,49 @@
+# Maintainer: nvaert1986 <25772781+nvaert1986@users.noreply.github.com>
+# SPDX-License-Identifier: GPL-2.0-only
+
+pkgbase=trigger6
+pkgname=(trigger6-dkms trigger6-fast)
+pkgver=1.1.0
+pkgrel=1
+pkgdesc='Linux DRM driver for MCT Trigger 6 USB to HDMI adapters (StarTech USB32HDES)'
+arch=('x86_64')
+url='https://github.com/nvaert1986/trigger6-kernel-module'
+license=('GPL-2.0-only')
+# a split PKGBUILD lists the packages' dependencies here too (namcap)
+makedepends=('gcc' 'dkms' 'libyuv')
+options=('!debug')
+source=("$pkgbase-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+	cd "trigger6-kernel-module-$pkgver"
+	${CC:-cc} $CFLAGS -pthread -o trigger6-fast userspace/trigger6-fast.c -ldl $LDFLAGS
+}
+
+package_trigger6-dkms() {
+	pkgdesc='DRM/KMS driver for MCT Trigger 6 USB to HDMI adapters: display, cursor, gamma, HDMI audio (DKMS)'
+	arch=('any')
+	depends=('dkms')
+	optdepends=('linux-headers: build the module for the linux kernel'
+		'linux-lts-headers: build the module for the linux-lts kernel'
+		'trigger6-fast: SIMD helper for about 60 frames per second')
+	backup=('etc/modprobe.d/trigger6.conf')
+
+	cd "trigger6-kernel-module-$pkgver"
+	local dest="$pkgdir/usr/src/trigger6-$pkgver"
+	install -d "$dest/kernel"
+	install -m 0644 kernel/Kbuild kernel/Makefile kernel/*.c kernel/*.h "$dest/kernel/"
+	install -m 0644 dkms.conf LICENSE README.md "$dest/"
+	install -Dm 0644 packaging/debian13/trigger6.conf "$pkgdir/etc/modprobe.d/trigger6.conf"
+}
+
+package_trigger6-fast() {
+	pkgdesc='SIMD NV12 helper, udev rule and systemd user service for the trigger6 USB display driver'
+	depends=('glibc' 'libyuv')
+	optdepends=('trigger6-dkms: the kernel driver')
+
+	cd "trigger6-kernel-module-$pkgver"
+	install -Dm 0755 trigger6-fast "$pkgdir/usr/bin/trigger6-fast"
+	install -Dm 0644 packaging/debian13/71-trigger6.rules "$pkgdir/usr/lib/udev/rules.d/71-trigger6.rules"
+	install -Dm 0644 packaging/debian13/trigger6-fast.service "$pkgdir/usr/lib/systemd/user/trigger6-fast.service"
+}

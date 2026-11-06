@@ -1,22 +1,20 @@
-# MCT Trigger 6 (T6) USB display driver for Linux, release `1.1.0-beta4`
+# MCT Trigger 6 (T6) USB display driver for Linux, release `1.1.0`
 
 An out-of-tree Linux DRM/KMS kernel driver and a small user-space helper for the
 MCT "T6 USB Station" chipset, as found in the **StarTech USB32HDES** USB 3.0 to HDMI adapter.
 This release reaches about **60 new frames per second at 1920x1080** on the tested
 setup, with a stable USB connection.
 
-> **New in 1.1.0 (beta): HDMI audio support.** The adapter now also appears as a sound card ("Trigger6 USB to HDMI
-> Adapter"). **Heard on real hardware with 1.1.0-beta3:** played through the built-in speakers of an iiyama
-> PL2595W, without dropouts, and back by itself after an HDMI replug during playback. See the
-> [1.1.0-beta1 entry](#110-beta1-2026-11-05) and the [audio test](#tested-configuration). **1.1.0-beta3** adds a
-> hardware cursor (moving the mouse no longer sends whole frames), a gamma table, the monitor's full EDID (extension
-> blocks) and the monitor's audio capabilities (ELD) for the sound card; see the
-> [1.1.0-beta3 entry](#110-beta3-2026-11-05). **1.1.0-beta4** fixes a second cursor and the picture after an HDMI
-> replug ([1.1.0-beta4 entry](#110-beta4-2026-11-05)). It is still a beta until it has run on a Debian machine.
+> **New in 1.1.0: HDMI audio, hardware cursor, gamma table, full EDID.** The adapter also appears as a sound card
+> ("Trigger6 USB to HDMI Adapter"), heard through a monitor's speakers and back by itself after an HDMI replug. The
+> mouse pointer is drawn by the adapter (moving it no longer sends whole frames), and the monitor's full EDID and
+> audio capabilities (ELD) are passed on. Tested on Gentoo, Debian 13 and Arch Linux, including DKMS with automatic
+> module signing and suspend/resume. Packages for Debian/Ubuntu, Fedora, Arch (AUR) and Gentoo: see
+> [Packages](#packages). Details in the [1.1.0 entry](#110-2026-11-06).
 
 > **Status: experimental.** Tested on one adapter model (see
-> [Tested configuration](#tested-configuration)). Version 1.1.0-beta4 works on Wayland and builds on Arch Linux (kernel 7.2) and
-> Debian 13 (kernel 6.12). **On Xorg, unplugging the USB adapter crashes the X server** (a bug in Xorg, reported to
+> [Tested configuration](#tested-configuration)). Version 1.1.0 works on Wayland and runs on Gentoo (kernel 6.18),
+> Debian 13 (kernel 6.12) and Arch Linux (kernel 7.2). **On Xorg, unplugging the USB adapter crashes the X server** (a bug in Xorg, reported to
 > Debian, see [Limitations](#limitations)); unplugging only the HDMI cable is fine. Use at your own risk.
 
 ---
@@ -28,14 +26,15 @@ setup, with a stable USB connection.
 3. [What is in this repository](#what-is-in-this-repository)
 4. [How it works](#how-it-works)
 5. [Requirements](#requirements)
-6. [Build and install](#build-and-install)
-7. [Running the fast helper](#running-the-fast-helper)
-8. [Activating the monitor](#activating-the-monitor)
-9. [Module parameters](#module-parameters)
-10. [Troubleshooting](#troubleshooting)
-11. [Limitations](#limitations)
-12. [Changelog](#changelog)
-13. [Origin, license and credits](#origin-license-and-credits)
+6. [Packages](#packages)
+7. [Build and install](#build-and-install)
+8. [Running the fast helper](#running-the-fast-helper)
+9. [Activating the monitor](#activating-the-monitor)
+10. [Module parameters](#module-parameters)
+11. [Troubleshooting](#troubleshooting)
+12. [Limitations](#limitations)
+13. [Changelog](#changelog)
+14. [Origin, license and credits](#origin-license-and-credits)
 
 ---
 
@@ -56,6 +55,9 @@ setup, with a stable USB connection.
 | 1.0.3 monitor test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), seven monitors from three brands: each detected on plug-in, set to its native mode, clean picture, no errors |
 | 1.1.0-beta1 audio test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), PipeWire: sound card registered, playback through `aplay` and PipeWire, USB transfers checked with usbmon. **Not heard**: no monitor with speakers or audio output available |
 | 1.1.0-beta3 audio test (by ear) | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), PipeWire, iiyama PL2595W (2 x 2 W speakers, OSD Audio Source = HDMI): audio heard, 4532 packets with 0 underruns (`audio_fills=0`), no USB errors; ELD "PL2595W" with LPCM 2 ch 32/44.1/48 kHz 16/20/24 bit, jack plugged; after an HDMI replug during playback the audio came back by itself (engine restarted, still 0 underruns) |
+| 1.1.0 Debian 13 test | Runs and works on a Debian 13 machine (kernel 6.12), including the udev rule and the systemd user service |
+| 1.1.0 Arch Linux test | Installed with DKMS and automatic module signing, builds without errors, works, including suspend/resume with the adapter connected |
+| 1.1.0 packages | Built and install-tested in containers: Debian 13 (`.deb`, DKMS build for 6.12.115, signed), Fedora 45 (`.rpm`, DKMS build for 7.2.15, signed), Arch Linux (`PKGBUILD`, DKMS hook build for 7.2.14); `lintian`, `rpmlint` and `namcap` without relevant findings |
 | 1.1.0-beta4 replug test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), Dell P2725HE: slow and fast HDMI replugs with the pointer on the monitor and on the laptop screen: one cursor and a clean picture each time, no errors |
 | 1.1.0-beta4 builds | Linux 6.18.59 and Debian 13 `linux-headers-6.12.113+deb13-amd64` (cross-build, `W=1`, no warnings) |
 | 1.1.0-beta3 test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), Dell P2725HE: EDID extension block read, ELD and jack controls, hardware cursor used by KWin, gamma table checked with a warm test table; feature level 8 |
@@ -112,6 +114,9 @@ Caveats, stated plainly:
 | `packaging/debian13/Makefile.helper` | Makefile for building the helper |
 | `packaging/debian13/trigger6-fast.c`, `dkms.conf` | Identical copies of the helper source and `dkms.conf`, so the folder is a complete packaging input |
 | `packaging/debian13/DEPENDENCIES.md` | Package dependencies and test notes for Debian 13 |
+| `packaging/deb/build-deb.sh` | Builds the Debian packages `trigger6-dkms` and `trigger6-fast`, see [Packages](#packages) |
+| `packaging/rpm/trigger6.spec` | Fedora packages `trigger6-dkms` and `trigger6-fast` |
+| `packaging/arch/PKGBUILD` | Arch Linux / AUR packages `trigger6-dkms` and `trigger6-fast` |
 | `LICENSE` | GPL-2.0-only for the kernel module and the helper; MIT notice for upstream-derived user-space tools |
 
 ## How it works
@@ -232,6 +237,25 @@ Kernel options required (default on Debian and Arch): `CONFIG_DRM`, `CONFIG_DRM_
 without it the module builds and works without the sound card.
 Secure Boot systems must sign the module or enrol the DKMS key.
 
+## Packages
+
+Each release has two packages: **`trigger6-dkms`** (the kernel module, built by DKMS for every installed kernel
+with headers, plus `/etc/modprobe.d/trigger6.conf`) and **`trigger6-fast`** (the helper, the udev rule and the
+systemd user service). Install both, then plug in the adapter; the helper starts by itself.
+
+* **Debian 13 / Ubuntu:** download `trigger6-dkms_1.1.0-1_all.deb` and `trigger6-fast_1.1.0-1_amd64.deb` from the
+  [release page](https://github.com/nvaert1986/trigger6-kernel-module/releases/tag/v1.1.0), then
+  `sudo apt install linux-headers-amd64 ./trigger6-dkms_1.1.0-1_all.deb ./trigger6-fast_1.1.0-1_amd64.deb`.
+* **Fedora:** download the two `.rpm` files from the release page, then
+  `sudo dnf install ./trigger6-dkms-1.1.0-1.fc45.noarch.rpm ./trigger6-fast-1.1.0-1.fc45.x86_64.rpm`.
+* **Arch Linux:** AUR package base `trigger6` (packages `trigger6-dkms` and `trigger6-fast`), or build
+  `packaging/arch/PKGBUILD` with `makepkg -si`. Install `linux-headers` (or the headers of your kernel).
+* **Gentoo:** the overlay [trigger6-overlay](https://github.com/nvaert1986/trigger6-overlay), package
+  `x11-drivers/trigger6`; see its README.
+
+With Secure Boot, DKMS signs the module with its own key (`/var/lib/dkms/mok.pub`); enrol it once with
+`mokutil --import /var/lib/dkms/mok.pub`. Uninstalling `trigger6-dkms` removes the module from every kernel.
+
 ## Build and install
 
 Get the source:
@@ -276,7 +300,7 @@ name shown under `/sys/bus/usb/drivers/trigger6/`) and retry after a second or t
 sudo apt install dkms build-essential linux-headers-amd64 libyuv0   # Debian 13
 sudo pacman -S --needed dkms base-devel linux-headers libyuv        # Arch (linux-lts-headers for the LTS kernel)
 
-VER=1.1.0-beta4
+VER=1.1.0
 sudo mkdir -p /usr/src/trigger6-$VER
 sudo cp -r kernel dkms.conf LICENSE README.md /usr/src/trigger6-$VER/
 sudo dkms add     -m trigger6 -v $VER
@@ -290,7 +314,7 @@ sudo modprobe trigger6
 `dkms.conf` is in the repository root (an identical copy is in `packaging/debian13/`) and is copied along as shown.
 DKMS then rebuilds the module for each newly installed kernel. Remember that matching headers must be installed.
 `trigger6.conf` sets `primary_userspace_nv12=1`, so the module uses the fast helper whenever it runs.
-Check the installed version with `modinfo -F version trigger6` (prints `1.1.0-beta4`).
+Check the installed version with `modinfo -F version trigger6` (prints `1.1.0`).
 
 ### C. Install the helper
 
@@ -429,12 +453,28 @@ Set one at load time with `modprobe trigger6 name=value`.
   problems. The driver removes the device the standard DRM way (`drm_dev_unplug()`), and the crash is in the X server,
   so it has been reported to Debian as an Xorg bug. Until that is fixed, use Wayland, or log out of the Xorg session
   before unplugging the adapter.
-* Builds on Debian 13 (kernel 6.12) and Arch Linux (kernel 7.2). Not tested with KASAN/lockdep kernels. The
-  udev/systemd integration is tested on Gentoo with systemd, not yet on Debian.
-* Not tested: suspend/resume with the adapter connected (checklist steps 4 and 5), HDMI audio side effects (step 14)
-  and recovery from a USB transport fault (step 7, no clean way to cause one).
+* Runs on Gentoo (6.18), Debian 13 (6.12) and Arch Linux (7.2), including the udev rule and the systemd user service;
+  suspend/resume with the adapter connected tested on Arch Linux. Not tested with KASAN/lockdep kernels.
+* Not tested: recovery from a USB transport fault (step 7, no clean way to cause one).
 
 ## Changelog
+
+### 1.1.0 (2026-11-06)
+
+**Final release of 1.1.0.** The code is 1.1.0-beta4; only the version and `dkms.conf` changed (the `CLEAN` line,
+deprecated in DKMS 3, is gone). Upgrading an existing DKMS install: run `dkms remove trigger6/<installed version> --all`,
+then install `1.1.0` as in [section B](#b-permanent-install-with-dkms-debian-13--ubuntu--arch), or use the
+[packages](#packages).
+
+What 1.1.0 brings over 1.0.x (items 37 to 46 below): HDMI audio as a sound card with volume control (item 37), the
+monitor's full EDID (40), ELD and jack controls (42), a gamma table (43), a hardware cursor (44) and two HDMI replug
+fixes (45, 46); 1.0.6 (item 39) is included.
+
+**Testing status, stated plainly:** tested on the adapter on Gentoo (Linux 6.18.59, KDE Plasma Wayland; display,
+audio by ear, cursor, gamma, replugs), on a Debian 13 machine (runs, udev rule and user service) and on Arch Linux
+(DKMS with automatic signing, suspend/resume). New in this release: packages for Debian/Ubuntu (`.deb`), Fedora
+(`.rpm`), Arch Linux (`PKGBUILD` for the AUR) and Gentoo (overlay), each built and install-tested in a container of
+that distribution, including the DKMS build against its kernel headers.
 
 ### 1.1.0-beta4 (2026-11-05)
 
@@ -1026,6 +1066,7 @@ original companion tools goes to the original author. The copyright notice
 * The user-space SIMD bridge (`trigger6_bridge.h`, `trigger6-fast`), the asynchronous two-URB USB path and the removal of per-frame copies.
 * `0.9.0-r9`: review fixes for fault recovery, probe error handling, output switch-off, suspend/resume, mode handling and the helper, plus corrected 1080p timing and volume request data.
 * `1.0.0`: init and mode-set sequence, interrupt endpoint, the adapter's own mode table and sync encoding (see [Changelog](#changelog)).
+* `1.1.0`: final release of the 1.1.0 betas; packages for Debian/Ubuntu, Fedora, Arch Linux and Gentoo.
 * `1.1.0-beta4`: HDMI replug fixes (second cursor, picture resend).
 * `1.1.0-beta3`: hardware cursor, gamma table, EDID extension blocks, ELD and jack controls.
 * `1.1.0-beta2`: Debian 13 (6.12) build of the audio code confirmed.
