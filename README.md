@@ -7,10 +7,11 @@ setup, with a stable USB connection.
 
 > **New in 1.2.0 (beta): partial updates and USB 2 support.** Only what changed on screen is sent, as rectangles
 > into the hidden frame buffer followed by a flip, and an unchanged picture is not sent at all; on a USB 2 port
-> every update goes as small rectangle writes. Partial updates are tested on the adapter over USB 3 and USB 2 (USB 2:
-> works, a bit laggy). **1.2.0-beta2** makes the simulated vblank work smoothly (commits copy only what changed) and
-> supports it as an option, **off by default** (`vblank_timer=1`). **1.2.0-beta3** keeps several rectangle writes in
-> flight instead of sending them one by one, mainly for USB 2 (tested over USB 3, USB 2 not yet). See the
+> every update goes as small rectangle writes. Partial updates are tested on the adapter over USB 3 and USB 2.
+> **1.2.0-beta2** makes the simulated vblank work smoothly (commits copy only what changed) and supports it as an
+> option, **off by default** (`vblank_timer=1`, tested on Wayland and Xorg). **1.2.0-beta3** keeps several rectangle
+> writes in flight instead of sending them one by one: on USB 2 that doubles the throughput compared with
+> 1.2.0-beta1 (about 42 instead of 21 MB/s, tested over USB 3 and USB 2). See the
 > [1.2.0-beta3](#120-beta3-2026-11-06), [1.2.0-beta2](#120-beta2-2026-11-06) and [1.2.0-beta1](#120-beta1-2026-11-06)
 > entries; `partial_updates=0` gives the 1.1.0 behaviour.
 
@@ -66,6 +67,8 @@ setup, with a stable USB connection.
 | 1.1.0-beta3 audio test (by ear) | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), PipeWire, iiyama PL2595W (2 x 2 W speakers, OSD Audio Source = HDMI): audio heard, 4532 packets with 0 underruns (`audio_fills=0`), no USB errors; ELD "PL2595W" with LPCM 2 ch 32/44.1/48 kHz 16/20/24 bit, jack plugged; after an HDMI replug during playback the audio came back by itself (engine restarted, still 0 underruns) |
 | 1.2.0-beta3 builds | Linux 6.18.59 and Debian 13 `linux-headers-6.12.113+deb13-amd64` (cross-build, `W=1`, no warnings) |
 | 1.2.0-beta3 USB 3 test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), Dell P2725HE, USB 3: typing and video playback with the pipelined rectangle writes, picture correct; 1,238 frames (758 as rectangles, 4,082 rectangle writes), 1,226 unchanged pictures not sent, no send, USB or short-write errors, every frame confirmed; 6.6 ms USB time per frame on average |
+| 1.2.0-beta3 USB 2 test | Debian 13 machine (kernel 6.12.115), LXDE on Xorg, 1920x1080 on a USB 2 port, installed from the `1.2.0~beta3-1` packages (DKMS build with module signing): about 42 MB/s while sending, twice 1.2.0-beta1 and close to what USB 2 carries; full-screen video (4K and 8K YouTube scaled to 1080p) at about 19 frames per second sent, 1.78 MB per frame on average (a full frame is 3.1 MB), 10.7 GB sent in 5,403 frames without a single error; browsing, scrolling and typing respond much better than with 1.2.0-beta1 |
+| 1.2.0-beta3 vblank test on Xorg | Same machine, USB 2, `vblank_timer=1`: works, video playback without errors (919 frames), commits 3.0 ms on average (6.1 ms at most), cursor fine; tearing barely visible and about the same as without the timer |
 | 1.2.0-beta2 vblank test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), Dell P2725HE, USB 3, `vblank_timer=1`: mouse, window moves, typing and video playback fluent, a barely noticeable bit more lag than without the timer; commits 1.5 to 4 ms (2.2 ms on average), cursor updates up to 41 per second (53 without the timer), no errors |
 | 1.2.0-beta1 USB 2 test | Debian 13 machine (kernel 6.12.115), LXDE on Xorg, Dell P2725HE on a USB 2 port, packages `1.2.0~beta1-1`: USB 2 detected automatically ("USB 2 link" in the kernel log), every update after the first frames sent as rectangle writes (551 of 561), no errors; usable for desktop work, noticeably laggy (about 13.6 ms of USB time per update, up to 100 ms for large changes) |
 | 1.1.0 Debian 13 test | Runs and works on a Debian 13 machine (kernel 6.12), including the udev rule and the systemd user service |
@@ -226,8 +229,9 @@ Early versions suffered from complete USB disconnect/re-enumerations. The root c
 These measures were taken, and the long tests then ran without a reset:
 
 * Use a USB 3.0 port directly. On USB 2 (since 1.2.0, tested) the adapter works, but at about a tenth of the
-  bandwidth: desktop use works thanks to partial updates but feels a bit laggy, and full-screen motion (video,
-  scrolling a whole page) is slow.
+  bandwidth: desktop use works well thanks to partial updates (since 1.2.0-beta3), and full-screen video at
+  1920x1080 reaches about 19 frames per second (the newest picture is always shown, so motion does not lag
+  behind). A lower mode, for example 1280x720, leaves more frames per second.
 * Full frames are sent. The experimental partial VRAM writes (`primary_partial_updates`) are **off** by default.
 * USB transfers follow the size the vendor's Windows code uses (`0xffc00` = 1 047 552 bytes).
 * Bulk writes are serialised per device with a mutex, have a 5 s timeout, kill the URB and queue a device reset on a timeout.
@@ -490,14 +494,16 @@ Set one at load time with `modprobe trigger6 name=value`.
 
 ### 1.2.0-beta3 (2026-11-06)
 
-**Beta: faster rectangle writes, mainly for USB 2. Tested over USB 3; USB 2 not yet.** Upgrading an existing DKMS
+**Beta: faster rectangle writes, mainly for USB 2. Tested over USB 3 and USB 2.** Upgrading an existing DKMS
 install: run `dkms remove trigger6/<installed version> --all`, then install `1.2.0-beta3` as in
 [section B](#b-permanent-install-with-dkms-debian-13--ubuntu--arch). The helper and its service are unchanged.
 
 **Testing status, stated plainly:** builds without warnings (`W=1`) against Linux 6.18.59 and, as a cross-build,
 against Debian 13's `linux-headers-6.12.113+deb13-amd64`; `checkpatch` without findings. Tested on the adapter
 over USB 3 (typing, video playback): picture correct, no errors, every frame confirmed (see
-[Tested configuration](#tested-configuration)). Not yet tested over USB 2, where the gain is expected.
+[Tested configuration](#tested-configuration)). Over USB 2 on a Debian 13 machine (installed from the
+`1.2.0~beta3-1` packages): about 42 MB/s while sending, twice 1.2.0-beta1, full-screen 1080p video at about 19
+frames per second, no errors, and desktop work responds much better than with 1.2.0-beta1.
 
 53. **Rectangle writes in flight** (`t6_send_rects_async`, `t6_rect_submit`, `t6_rect_reap`). Each rectangle write
     is two transfers, its 32-byte header and its data, and until now each transfer waited for the previous one to
@@ -521,8 +527,9 @@ existing DKMS install: run `dkms remove trigger6/<installed version> --all`, the
 
 **Testing status, stated plainly:** builds without warnings (`W=1`) against Linux 6.18.59 and, as a cross-build,
 against Debian 13's `linux-headers-6.12.113+deb13-amd64`; `checkpatch` without findings. Tested on the adapter over
-USB 3 with `vblank_timer=1` (see [Tested configuration](#tested-configuration)): fluent, no errors. Not tested:
-`vblank_timer=1` on Xorg, and the async cursor path (used by Xorg's legacy cursor calls, not by KDE Plasma).
+USB 3 with `vblank_timer=1` (see [Tested configuration](#tested-configuration)): fluent, no errors. With 1.2.0-beta3
+also tested with `vblank_timer=1` on Xorg (LXDE, Debian 13, USB 2): works, no errors, cursor fine, tearing about the
+same as without the timer.
 
 50. **Fast commits** (`t6_plane_atomic_update`, `t6_bridge_export`). The primary plane now takes the compositor's
     damage clips (`drm_plane_enable_fb_damage_clips`), and a commit copies only the changed rectangle into the

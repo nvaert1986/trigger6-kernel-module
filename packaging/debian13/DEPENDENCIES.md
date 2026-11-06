@@ -100,8 +100,8 @@ Without the helper the driver falls back to in-kernel conversion (~29 fps).
 
 ## 1.2.0-beta2 - additional checks
 - No new packages. New kernel interfaces used: DRM damage helpers (`drm_plane_enable_fb_damage_clips`, `drm_atomic_helper_damage_merged`), `drm_crtc_vblank_crtc`, `drm_calc_timestamping_constants`, `drm_crtc_vblank_count_and_time` and the plane's async check/update hooks; all present in 6.12 (`kernel/Kbuild` handles the 6.13 change of `atomic_async_check`).
-- Cross-built against Debian 13's `linux-headers-6.12.113+deb13-amd64` with `W=1`: no errors or warnings. Not yet run on a Debian machine.
+- Cross-built against Debian 13's `linux-headers-6.12.113+deb13-amd64` with `W=1`: no errors or warnings. Run on a Debian 13 machine (kernel 6.12.115) from the `1.2.0~beta3-1` packages: DKMS build and module signing worked; tested over USB 2, also with `vblank_timer=1`.
 
 ## 1.2.0-beta3 - additional checks
 - No new packages and no new kernel interfaces (URBs and completions as already used for full frames).
-- Cross-built against Debian 13's `linux-headers-6.12.113+deb13-amd64` with `W=1`: no errors or warnings. Not yet run on a Debian machine.
+- Cross-built against Debian 13's `linux-headers-6.12.113+deb13-amd64` with `W=1`: no errors or warnings. Run on a Debian 13 machine (kernel 6.12.115) from the `1.2.0~beta3-1` packages: DKMS build and module signing worked; tested over USB 2, also with `vblank_timer=1`.
