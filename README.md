@@ -1,29 +1,25 @@
-# MCT Trigger 6 (T6) USB display driver for Linux, release `1.2.0-beta3`
+# MCT Trigger 6 (T6) USB display driver for Linux, release `1.2.0`
 
 An out-of-tree Linux DRM/KMS kernel driver and a small user-space helper for the
 MCT "T6 USB Station" chipset, as found in the **StarTech USB32HDES** USB 3.0 to HDMI adapter.
 This release reaches about **60 new frames per second at 1920x1080** on the tested
 setup, with a stable USB connection.
 
-> **New in 1.2.0 (beta): partial updates and USB 2 support.** Only what changed on screen is sent, as rectangles
-> into the hidden frame buffer followed by a flip, and an unchanged picture is not sent at all; on a USB 2 port
-> every update goes as small rectangle writes. Partial updates are tested on the adapter over USB 3 and USB 2.
-> **1.2.0-beta2** makes the simulated vblank work smoothly (commits copy only what changed) and supports it as an
-> option, **off by default** (`vblank_timer=1`, tested on Wayland and Xorg). **1.2.0-beta3** keeps several rectangle
-> writes in flight instead of sending them one by one: on USB 2 that doubles the throughput compared with
-> 1.2.0-beta1 (about 42 instead of 21 MB/s, tested over USB 3 and USB 2). See the
-> [1.2.0-beta3](#120-beta3-2026-11-06), [1.2.0-beta2](#120-beta2-2026-11-06) and [1.2.0-beta1](#120-beta1-2026-11-06)
-> entries; `partial_updates=0` gives the 1.1.0 behaviour.
+> **New in 1.2.0: partial updates and USB 2 support.** Only what changed on screen is sent, as rectangles into
+> the hidden frame buffer followed by a flip, and an unchanged picture is not sent at all. Several rectangle writes
+> are kept in flight, so a USB 2 port carries about 42 MB/s and desktop work over USB 2 responds well. A simulated
+> vblank is available as an option, **off by default** (`vblank_timer=1`, tested on Wayland and Xorg). Tested on
+> several machines with the adapter, over USB 3 and USB 2. Packages for Debian/Ubuntu, Fedora, Arch Linux and Gentoo:
+> see [Packages](#packages). Details in the [1.2.0 entry](#120-2026-11-10); `partial_updates=0` gives the 1.1.0
+> behaviour.
 
 > **New in 1.1.0: HDMI audio, hardware cursor, gamma table, full EDID.** The adapter also appears as a sound card
 > ("Trigger6 USB to HDMI Adapter"), heard through a monitor's speakers and back by itself after an HDMI replug. The
 > mouse pointer is drawn by the adapter (moving it no longer sends whole frames), and the monitor's full EDID and
-> audio capabilities (ELD) are passed on. Tested on Gentoo, Debian 13 and Arch Linux, including DKMS with automatic
-> module signing and suspend/resume. Packages for Debian/Ubuntu, Fedora, Arch Linux and Gentoo: see
-> [Packages](#packages). Details in the [1.1.0 entry](#110-2026-11-06).
+> audio capabilities (ELD) are passed on. Details in the [1.1.0 entry](#110-2026-11-06).
 
 > **Status: experimental.** Tested on one adapter model (see
-> [Tested configuration](#tested-configuration)). Version 1.1.0 works on Wayland and runs on Gentoo (kernel 6.18),
+> [Tested configuration](#tested-configuration)). Version 1.2.0 works on Wayland and Xorg and runs on Gentoo (kernel 6.18),
 > Debian 13 (kernel 6.12) and Arch Linux (kernel 7.2). **On Xorg, unplugging the USB adapter crashes the X server** (a bug in Xorg, reported to
 > Debian, see [Limitations](#limitations)); unplugging only the HDMI cable is fine. Use at your own risk.
 
@@ -65,6 +61,8 @@ setup, with a stable USB connection.
 | 1.0.3 monitor test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), seven monitors from three brands: each detected on plug-in, set to its native mode, clean picture, no errors |
 | 1.1.0-beta1 audio test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), PipeWire: sound card registered, playback through `aplay` and PipeWire, USB transfers checked with usbmon. **Not heard**: no monitor with speakers or audio output available |
 | 1.1.0-beta3 audio test (by ear) | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), PipeWire, iiyama PL2595W (2 x 2 W speakers, OSD Audio Source = HDMI): audio heard, 4532 packets with 0 underruns (`audio_fills=0`), no USB errors; ELD "PL2595W" with LPCM 2 ch 32/44.1/48 kHz 16/20/24 bit, jack plugged; after an HDMI replug during playback the audio came back by itself (engine restarted, still 0 underruns) |
+| 1.2.0 test | The 1.2.0-beta3 code (1.2.0 adds only a metrics counter): run on several machines with the adapter, works |
+| 1.2.0 packages | Built from the release tarball and install-tested in containers: Debian 13 (`.deb`, DKMS build for 6.12.116, signed), Fedora 45 (`.rpm`, DKMS build for 7.3.3, signed), Arch Linux (`.pkg.tar.zst`, DKMS build for 7.2.15, signed); the helper starts, and removing the packages removes the module |
 | 1.2.0-beta3 builds | Linux 6.18.59 and Debian 13 `linux-headers-6.12.113+deb13-amd64` (cross-build, `W=1`, no warnings) |
 | 1.2.0-beta3 USB 3 test | Gentoo, Linux 6.18.59, KDE Plasma (Wayland), Dell P2725HE, USB 3: typing and video playback with the pipelined rectangle writes, picture correct; 1,238 frames (758 as rectangles, 4,082 rectangle writes), 1,226 unchanged pictures not sent, no send, USB or short-write errors, every frame confirmed; 6.6 ms USB time per frame on average |
 | 1.2.0-beta3 USB 2 test | Debian 13 machine (kernel 6.12.115), LXDE on Xorg, 1920x1080 on a USB 2 port, installed from the `1.2.0~beta3-1` packages (DKMS build with module signing): about 42 MB/s while sending, twice 1.2.0-beta1 and close to what USB 2 carries; full-screen video (4K and 8K YouTube scaled to 1080p) at about 19 frames per second sent, 1.78 MB per frame on average (a full frame is 3.1 MB), 10.7 GB sent in 5,403 frames without a single error; browsing, scrolling and typing respond much better than with 1.2.0-beta1 |
@@ -280,20 +278,21 @@ Each release has two packages: **`trigger6-dkms`** (the kernel module, built by 
 with headers, plus `/etc/modprobe.d/trigger6.conf`) and **`trigger6-fast`** (the helper, the udev rule and the
 systemd user service). Install both, then plug in the adapter; the helper starts by itself.
 
-* **Debian 13 / Ubuntu:** download `trigger6-dkms_1.1.0-1_all.deb` and `trigger6-fast_1.1.0-1_amd64.deb` from the
-  [release page](https://github.com/nvaert1986/trigger6-kernel-module/releases/tag/v1.1.0), then
-  `sudo apt install linux-headers-amd64 ./trigger6-dkms_1.1.0-1_all.deb ./trigger6-fast_1.1.0-1_amd64.deb`.
+* **Debian 13 / Ubuntu:** download `trigger6-dkms_1.2.0-1_all.deb` and `trigger6-fast_1.2.0-1_amd64.deb` from the
+  [release page](https://github.com/nvaert1986/trigger6-kernel-module/releases/tag/v1.2.0), then
+  `sudo apt install linux-headers-amd64 ./trigger6-dkms_1.2.0-1_all.deb ./trigger6-fast_1.2.0-1_amd64.deb`.
 * **Fedora:** download the two `.rpm` files from the release page, then
-  `sudo dnf install ./trigger6-dkms-1.1.0-1.fc45.noarch.rpm ./trigger6-fast-1.1.0-1.fc45.x86_64.rpm`.
-* **Arch Linux:** download `trigger6-dkms-1.1.0-1-any.pkg.tar.zst` and `trigger6-fast-1.1.0-1-x86_64.pkg.tar.zst`
+  `sudo dnf install ./trigger6-dkms-1.2.0-1.fc45.noarch.rpm ./trigger6-fast-1.2.0-1.fc45.x86_64.rpm`.
+* **Arch Linux:** download `trigger6-dkms-1.2.0-1-any.pkg.tar.zst` and `trigger6-fast-1.2.0-1-x86_64.pkg.tar.zst`
   from the release page, then `sudo pacman -S linux-headers` (or the headers of your kernel) and
-  `sudo pacman -U ./trigger6-dkms-1.1.0-1-any.pkg.tar.zst ./trigger6-fast-1.1.0-1-x86_64.pkg.tar.zst`. Or build
+  `sudo pacman -U ./trigger6-dkms-1.2.0-1-any.pkg.tar.zst ./trigger6-fast-1.2.0-1-x86_64.pkg.tar.zst`. Or build
   `packaging/arch/PKGBUILD` yourself with `makepkg -si`. There is no AUR package.
 * **Gentoo:** the overlay [trigger6-overlay](https://github.com/nvaert1986/trigger6-overlay), package
   `x11-drivers/trigger6`; see its README.
 
 With Secure Boot, DKMS signs the module with its own key (`/var/lib/dkms/mok.pub`); enrol it once with
-`mokutil --import /var/lib/dkms/mok.pub`. Uninstalling `trigger6-dkms` removes the module from every kernel.
+`mokutil --import /var/lib/dkms/mok.pub`. DKMS needs `openssl` for that (the packages recommend it); without it the
+module is left unsigned and does not load with Secure Boot. Uninstalling `trigger6-dkms` removes the module from every kernel.
 
 ## Build and install
 
@@ -339,7 +338,7 @@ name shown under `/sys/bus/usb/drivers/trigger6/`) and retry after a second or t
 sudo apt install dkms build-essential linux-headers-amd64 libyuv0   # Debian 13
 sudo pacman -S --needed dkms base-devel linux-headers libyuv        # Arch (linux-lts-headers for the LTS kernel)
 
-VER=1.2.0-beta3
+VER=1.2.0
 sudo mkdir -p /usr/src/trigger6-$VER
 sudo cp -r kernel dkms.conf LICENSE README.md /usr/src/trigger6-$VER/
 sudo dkms add     -m trigger6 -v $VER
@@ -353,7 +352,7 @@ sudo modprobe trigger6
 `dkms.conf` is in the repository root (an identical copy is in `packaging/debian13/`) and is copied along as shown.
 DKMS then rebuilds the module for each newly installed kernel. Remember that matching headers must be installed.
 `trigger6.conf` sets `primary_userspace_nv12=1`, so the module uses the fast helper whenever it runs.
-Check the installed version with `modinfo -F version trigger6` (prints `1.2.0-beta3`).
+Check the installed version with `modinfo -F version trigger6` (prints `1.2.0`).
 
 ### C. Install the helper
 
@@ -509,6 +508,30 @@ Set one at load time with `modprobe trigger6 name=value`.
 * Not tested: recovery from a USB transport fault (step 7, no clean way to cause one).
 
 ## Changelog
+
+### 1.2.0 (2026-11-10)
+
+**Final release of 1.2.0.** The driver code is 1.2.0-beta3 plus one metrics counter (item 55). Upgrading an existing
+DKMS install: run `dkms remove trigger6/<installed version> --all`, then install `1.2.0` as in
+[section B](#b-permanent-install-with-dkms-debian-13--ubuntu--arch), or use the [packages](#packages). The helper
+and its service are unchanged since 1.1.0.
+
+What 1.2.0 brings over 1.1.0 (items 47 to 57): partial updates (47), USB 2 support (49), rectangle writes in flight
+(53, about twice the throughput on USB 2), fast commits that copy only what changed (50), a precise simulated vblank,
+supported but off by default (48, 51), and async cursor moves (52).
+
+**Testing status, stated plainly:** the 1.2.0-beta3 code was run on several machines with the adapter (Gentoo with
+KDE Plasma on Wayland over USB 3, a Debian 13 machine with LXDE on Xorg over USB 2) and works. The packages were built
+from the release tarball and install-tested in containers (see [Tested configuration](#tested-configuration)).
+
+55. **Metrics:** `t6_metrics` also reports `export_pixels`, the number of pixels the partial copies for the helper
+    copied (`export_pixels / export_partial` is the average damaged area per commit). It shows how much of the screen
+    the compositor reports as changed.
+56. **Packages:** `trigger6-dkms` recommends `openssl` (Debian and Fedora). DKMS needs it to create its key and sign
+    the module; minimal installs without it got an unsigned module, which Secure Boot refuses, and DKMS reported no
+    error.
+57. **Docs:** how to try another Trigger 6 adapter with `new_id` (untested, at your own risk), and a note that some
+    StarTech USB32HDES units carry a Trigger 5 chip, which this driver does not support.
 
 ### 1.2.0-beta3 (2026-11-06)
 
@@ -1224,7 +1247,8 @@ original companion tools goes to the original author. The copyright notice
 * The upstream README lists as contributors: Authentra, Claude Opus 4.6 (Anthropic), Codex 5.4 (OpenAI) and Gemini (Google).
 
 * HDMI audio (1.1.0-beta1) is a port of the implementation in [mct-linux](https://github.com/XXCoreRangerX/mct-linux)
-  (GPL-2.0-only), which decoded and verified the T6 audio protocol.
+  (GPL-2.0-only), which decoded and verified the T6 audio protocol. The partial updates (1.2.0-beta1) and the async
+  cursor moves (1.2.0-beta2) are ported from mct-linux as well.
 
 ### What this fork changes
 
@@ -1234,6 +1258,7 @@ original companion tools goes to the original author. The copyright notice
 * The user-space SIMD bridge (`trigger6_bridge.h`, `trigger6-fast`), the asynchronous two-URB USB path and the removal of per-frame copies.
 * `0.9.0-r9`: review fixes for fault recovery, probe error handling, output switch-off, suspend/resume, mode handling and the helper, plus corrected 1080p timing and volume request data.
 * `1.0.0`: init and mode-set sequence, interrupt endpoint, the adapter's own mode table and sync encoding (see [Changelog](#changelog)).
+* `1.2.0`: final release of the 1.2.0 betas; `export_pixels` metric, `openssl` recommended for DKMS signing.
 * `1.2.0-beta3`: rectangle writes in flight (faster partial updates, mainly on USB 2).
 * `1.2.0-beta2`: fast commits, precise vblank timer (supported, off by default), async cursor moves.
 * `1.2.0-beta1`: partial updates and USB 2 support (both tested), simulated vblank (off by default).

@@ -62,7 +62,7 @@ Version: $DEBVER-$REV
 Architecture: all
 Maintainer: nvaert1986 <25772781+nvaert1986@users.noreply.github.com>
 Depends: dkms (>= 3.0), kmod
-Recommends: linux-headers-amd64 | linux-headers-generic, trigger6-fast
+Recommends: linux-headers-amd64 | linux-headers-generic, openssl, trigger6-fast
 Section: kernel
 Priority: optional
 Homepage: https://github.com/nvaert1986/trigger6-kernel-module

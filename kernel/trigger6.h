@@ -293,6 +293,7 @@ struct t6_head_metrics {
 	atomic64_t rect_writes;
 	atomic64_t rect_bytes;
 	atomic64_t export_partial;	/* commits that copied only the damage */
+	atomic64_t export_pixels;	/* pixels those commits copied */
 	atomic64_t commit_samples;	/* primary plane update in the commit */
 	atomic64_t commit_ns_total;
 	u64 last_commit_ns;

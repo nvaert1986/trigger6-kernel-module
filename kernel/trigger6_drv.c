@@ -950,13 +950,14 @@ static ssize_t t6_metrics_show(struct device *dev,
 			(long long)atomic64_read(&head->metrics.rect_bytes),
 			t6->usb2, t6->vblank);
 		len += sysfs_emit_at(buf, len,
-			"head%u commit_avg_us=%llu commit_last_us=%llu commit_max_us=%llu export_partial=%lld\n",
+			"head%u commit_avg_us=%llu commit_last_us=%llu commit_max_us=%llu export_partial=%lld export_pixels=%lld\n",
 			head->output_idx,
 			div64_u64(t6_metrics_avg_ns(&head->metrics.commit_ns_total,
 						    &head->metrics.commit_samples), 1000),
 			div64_u64(READ_ONCE(head->metrics.last_commit_ns), 1000),
 			div64_u64(READ_ONCE(head->metrics.max_commit_ns), 1000),
-			(long long)atomic64_read(&head->metrics.export_partial));
+			(long long)atomic64_read(&head->metrics.export_partial),
+			(long long)atomic64_read(&head->metrics.export_pixels));
 		len += sysfs_emit_at(buf, len,
 			"head%u cursor_moves=%lld cursor_uploads=%lld cursor_cache_hits=%lld gamma_uploads=%lld\n",
 			head->output_idx,
@@ -6057,4 +6058,4 @@ MODULE_AUTHOR("Authentra / Ralph Friedman");
 MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_LICENSE("GPL");
 
-MODULE_VERSION("1.2.0-beta3");
+MODULE_VERSION("1.2.0");

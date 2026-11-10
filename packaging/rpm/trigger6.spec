@@ -6,7 +6,7 @@
 #   rpmbuild -ba --define "_sourcedir $PWD" trigger6.spec
 
 Name:           trigger6
-Version:        1.1.0
+Version:        1.2.0
 Release:        1%{?dist}
 Summary:        Linux DRM driver for MCT Trigger 6 USB to HDMI adapters
 License:        GPL-2.0-only
@@ -28,6 +28,8 @@ Requires:       dkms >= 3.0
 Requires:       kmod
 # headers must be there before %%post builds the module
 Requires(post): kernel-devel
+# DKMS needs it to create its key and sign the module (Secure Boot)
+Recommends:     openssl
 Recommends:     trigger6-fast
 
 %description -n trigger6-dkms
@@ -88,5 +90,8 @@ dkms remove -m trigger6 -v %{version} --all >/dev/null 2>&1 || :
 %{_userunitdir}/trigger6-fast.service
 
 %changelog
+* Tue Nov 10 2026 nvaert1986 <25772781+nvaert1986@users.noreply.github.com> - 1.2.0-1
+- Release 1.2.0: partial updates, USB 2 support, optional vblank timer, rectangle writes in flight.
+
 * Fri Nov 06 2026 nvaert1986 <25772781+nvaert1986@users.noreply.github.com> - 1.1.0-1
 - Release 1.1.0: HDMI audio, hardware cursor, gamma table, full EDID, ELD and jack.

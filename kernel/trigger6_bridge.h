@@ -219,6 +219,8 @@ static bool t6_bridge_export(struct t6_head *head, const void *pixels, u32 strid
 			memcpy(head->fb_export_buf + (size_t)y * row + x0,
 			       (const u8 *)pixels + (size_t)y * stride + x0, w);
 		atomic64_inc(&head->metrics.export_partial);
+		atomic64_add(drm_rect_width(damage) * drm_rect_height(damage),
+			     &head->metrics.export_pixels);
 		ret = 0;
 	} else {
 		ret = t6_pack_xrgb8888_tight(head, pixels, stride,

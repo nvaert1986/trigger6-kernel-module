@@ -1,4 +1,4 @@
-# trigger6 1.2.0-beta3 - target: Debian 13 (trixie), kernel 6.12.x LTS
+# trigger6 1.2.0 - target: Debian 13 (trixie), kernel 6.12.x LTS
 
 ## Package `trigger6-dkms` (kernel module)
 | Dependency | Type | Notes |
@@ -7,6 +7,7 @@
 | make, gcc (>= 14) | Depends | Must match the compiler the kernel was built with (Debian 13: gcc-14) |
 | linux-headers-amd64 | Depends/Recommends | Headers for 6.12.x (for example 6.12.107+deb13) |
 | kmod | Depends | modprobe/depmod |
+| openssl | Recommends | DKMS creates its signing key with it (since 1.2.0) |
 | ALSA in the kernel (`CONFIG_SND_PCM`) | Kernel | Default in Debian; needed for HDMI audio since 1.1.0-beta1, the display works without it |
 | pahole | Recommends | Only for BTF generation by kbuild |
 | udev (systemd) | Recommends | `71-trigger6.rules` |
@@ -105,3 +106,7 @@ Without the helper the driver falls back to in-kernel conversion (~29 fps).
 ## 1.2.0-beta3 - additional checks
 - No new packages and no new kernel interfaces (URBs and completions as already used for full frames).
 - Cross-built against Debian 13's `linux-headers-6.12.113+deb13-amd64` with `W=1`: no errors or warnings. Run on a Debian 13 machine (kernel 6.12.115) from the `1.2.0~beta3-1` packages: DKMS build and module signing worked; tested over USB 2, also with `vblank_timer=1`.
+
+## 1.2.0 - additional checks
+- No new kernel interfaces (one more `atomic64_t` counter). `trigger6-dkms` now recommends `openssl`: DKMS needs it to create its signing key; without it the module stays unsigned and DKMS reports no error.
+- The 1.2.0-beta3 code was run on several machines with the adapter and works. Packages built from the `v1.2.0` tarball and install-tested in a Debian 13 container: see the README's Tested configuration.
