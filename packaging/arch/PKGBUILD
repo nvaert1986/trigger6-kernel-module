@@ -13,7 +13,7 @@ license=('GPL-2.0-only')
 makedepends=('gcc' 'dkms' 'libyuv')
 options=('!debug')
 source=("$pkgbase-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('b1062a3aba6b1b80ef159869315064dd8f57fde8a5f51cfad09db0100f8196f1')
 
 build() {
 	cd "trigger6-kernel-module-$pkgver"
